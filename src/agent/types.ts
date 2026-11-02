@@ -155,6 +155,6 @@ export type AgentEvent =
   | { type: "mode-changed"; mode: Mode }
   | { type: "shell-notify"; message: string }
   | { type: "retry"; attempt: number; max: number; delayMs: number; resumeAt?: number; error: string }
-  | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string }
+  | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string; model?: string; thinkingLevel?: string }
   | { type: "max-steps"; steps: number }
   | { type: "error"; message: string };

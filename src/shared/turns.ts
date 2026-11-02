@@ -41,7 +41,7 @@ export type AgentEvent =
   | { type: "mode-changed"; mode: Mode }
   | { type: "shell-notify"; message: string }
   | { type: "retry"; attempt: number; max: number; delayMs: number; resumeAt?: number; error: string }
-  | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string }
+  | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string; model?: string; thinkingLevel?: string }
   | { type: "max-steps"; steps: number }
   | { type: "error"; message: string };
 
@@ -97,6 +97,10 @@ export interface CompactionBlock {
   status: "running" | "done" | "failed";
   /** The generated summary (once done). */
   summary?: string;
+  /** Model used for the summarization step. */
+  model?: string;
+  /** Effective thinking level / reasoning effort of the summarization step. */
+  thinkingLevel?: string;
 }
 /** Run paused at the step limit — chat shows a Continue button. */
 export interface MaxStepsBlock {
@@ -314,9 +318,12 @@ export function applyToBlocks(blocksIn: AssistantBlock[], ev: AgentEvent): Assis
     if (last && last.kind === "error") blocks[blocks.length - 1] = note;
     else blocks.push(note);
   } else if (ev.type === "compaction") {
-    const note: CompactionBlock = { kind: "compaction", status: ev.status, summary: ev.summary };
-    if (last && last.kind === "compaction" && last.status === "running") blocks[blocks.length - 1] = note;
-    else blocks.push(note);
+    const note: CompactionBlock = { kind: "compaction", status: ev.status, summary: ev.summary, model: ev.model, thinkingLevel: ev.thinkingLevel };
+    if (last && last.kind === "compaction" && last.status === "running") {
+      blocks[blocks.length - 1] = { ...last, ...note, model: note.model ?? last.model, thinkingLevel: note.thinkingLevel ?? last.thinkingLevel };
+    } else {
+      blocks.push(note);
+    }
   } else if (ev.type === "max-steps") {
     blocks.push({ kind: "max-steps", steps: ev.steps });
   }
@@ -590,9 +597,12 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
   if (ev.type === "compaction") {
     const { list, turn } = ensureAssistant(turns);
     const last = turn.blocks[turn.blocks.length - 1];
-    const block: CompactionBlock = { kind: "compaction", status: ev.status, summary: ev.summary };
-    if (last && last.kind === "compaction" && last.status === "running") turn.blocks[turn.blocks.length - 1] = block;
-    else turn.blocks.push(block);
+    const block: CompactionBlock = { kind: "compaction", status: ev.status, summary: ev.summary, model: ev.model, thinkingLevel: ev.thinkingLevel };
+    if (last && last.kind === "compaction" && last.status === "running") {
+      turn.blocks[turn.blocks.length - 1] = { ...last, ...block, model: block.model ?? last.model, thinkingLevel: block.thinkingLevel ?? last.thinkingLevel };
+    } else {
+      turn.blocks.push(block);
+    }
     return list;
   }
 

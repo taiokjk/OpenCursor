@@ -106,7 +106,7 @@ vi.mock("../integrations/mcpClient", async () => ({
 }));
 vi.mock("../logging", () => ({ logError: vi.fn() }));
 
-import { runAgent } from "./loop";
+import { runAgent, resolveCompactionThinkingLevel } from "./loop";
 import { writePlanTool } from "./tools/agent";
 import { TOOLS } from "./tools";
 import * as cursorContext from "../context/cursorContext";
@@ -794,8 +794,10 @@ describe("runAgent context consumption", () => {
 		for (const request of fixture.requests) expect(request.apiKeyPool).toBe(apiKeyPool);
 		expect(history.slice(0, originalHistory.length)).toEqual(originalHistory);
 		expect(events.filter((event) => event.type === "compaction")).toEqual([
-			{ type: "compaction", status: "running" },
-			summaryFails ? { type: "compaction", status: "failed" } : { type: "compaction", status: "done", summary },
+			{ type: "compaction", status: "running", model: "test-model", thinkingLevel: "disabled" },
+			summaryFails
+				? { type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled" }
+				: { type: "compaction", status: "done", summary, model: "test-model", thinkingLevel: "disabled" },
 		]);
 		if (!summaryFails) expect(events).toContainEqual(expect.objectContaining({ type: "usage", promptTokens: 750, completionTokens: 60 }));
 		expect(fixture.requests.filter((request) => request.tools === undefined)).toHaveLength(1);
@@ -874,7 +876,7 @@ describe("runAgent context consumption", () => {
 			contextTokens: 12_000,
 			maxTokens: 1024,
 		});
-		expect(events).toContainEqual({ type: "compaction", status: "done", summary });
+		expect(events).toContainEqual(expect.objectContaining({ type: "compaction", status: "done", summary, model: "claude-sonnet-4-6", thinkingLevel: "disabled" }));
 		expect(fixture.requests[0].tools).toBeUndefined();
 		expect(fixture.requests[0].model).toBe("claude-sonnet-4-6");
 		expect(fixture.requests[0].modelParams).toMatchObject({ thinking: "disabled", reasoningEffort: "low" });
@@ -1787,5 +1789,27 @@ describe("batch ordering and abort registration", () => {
     expect(seenSubRequests).toEqual([
       { model: "gemini-3.8-flash-high", oauthKind: "antigravity" },
     ]);
+  });
+});
+
+describe("resolveCompactionThinkingLevel", () => {
+  it("resolves low for antigravity gemini-4 models that do not support minimal", () => {
+    expect(resolveCompactionThinkingLevel("gemini-4-argon", "antigravity")).toBe("low");
+  });
+
+  it("resolves minimal for antigravity gemini-3 models that support minimal", () => {
+    expect(resolveCompactionThinkingLevel("gemini-3-flash", "antigravity")).toBe("minimal");
+  });
+
+  it("resolves disabled for models where thinking can be turned off", () => {
+    expect(resolveCompactionThinkingLevel("claude-sonnet-4-6", "claude-code")).toBe("disabled");
+  });
+
+  it("resolves low for codex models that cannot disable thinking", () => {
+    expect(resolveCompactionThinkingLevel("gpt-5-codex", "codex")).toBe("low");
+  });
+
+  it("resolves disabled for non-reasoning models", () => {
+    expect(resolveCompactionThinkingLevel("gpt-4o", "openai")).toBe("disabled");
   });
 });

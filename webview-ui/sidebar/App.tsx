@@ -479,21 +479,46 @@ function MaxStepsCard({ block, running }: { block: import("./types").AssistantBl
 /** In-chat marker: earlier conversation auto-summarized to free context. */
 function CompactionCard({ block }: { block: import("./types").AssistantBlock & { kind: "compaction" } }) {
   const [open, setOpen] = React.useState(false);
+  const meta = (block.model || block.thinkingLevel) ? (
+    <div className="compaction-meta">
+      {block.model && <span className="compaction-badge model" title={`Model: ${block.model}`}>{block.model}</span>}
+      {block.thinkingLevel && <span className="compaction-badge thinking" title={`Thinking level: ${block.thinkingLevel}`}>thinking: {block.thinkingLevel}</span>}
+    </div>
+  ) : null;
+
   if (block.status === "running") {
     return (
       <div className="compaction-card running">
-        <span className="spinner" /> Summarizing earlier conversation to free context…
+        <div className="compaction-head">
+          <div className="compaction-title">
+            <span className="spinner" />
+            <span>Summarizing earlier conversation to free context…</span>
+          </div>
+          {meta}
+        </div>
       </div>
     );
   }
   if (block.status === "failed") {
-    return <div className="compaction-card failed">Context summarization failed — older messages were trimmed instead.</div>;
+    return (
+      <div className="compaction-card failed">
+        <div className="compaction-head">
+          <div className="compaction-title">
+            <span>Context summarization failed — older messages were trimmed instead.</span>
+          </div>
+          {meta}
+        </div>
+      </div>
+    );
   }
   return (
     <div className={"compaction-card done" + (open ? " open" : "")}>
       <div className="compaction-head" onClick={() => setOpen((o) => !o)}>
-        <Icon name={open ? "chevD" : "chevR"} size={12} />
-        <span>Earlier conversation summarized to free context</span>
+        <div className="compaction-title">
+          <Icon name={open ? "chevD" : "chevR"} size={12} />
+          <span>Earlier conversation summarized to free context</span>
+        </div>
+        {meta}
       </div>
       {open && block.summary && <div className="compaction-body"><Markdown text={block.summary} /></div>}
     </div>

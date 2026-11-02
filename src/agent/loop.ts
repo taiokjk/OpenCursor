@@ -10,6 +10,7 @@
 import { streamChat, SamplingParams, ModelParams } from "./provider";
 import { responseTokenReservation } from "./providerLimits";
 import { clearOAuthCooldowns, getOAuthQuotaLimits, type OAuthKind } from "./oauth";
+import { getThinkingLevels } from "./oauth/protocols/providers/thinkingLevels.js";
 import { DEFAULT_QUOTA_BACKOFF_MS, MAX_QUOTA_RETRIES, resolveQuotaResumeAt, waitUntilQuotaResumeAt } from "./quotaRetry";
 import { OAUTH_PROVIDER_DEFINITIONS, supportsOAuthTools } from "../shared/oauthProviders";
 import { noteUserActivity } from "./semanticIndex";
@@ -319,6 +320,22 @@ export function coalesceEmit(raw: (e: AgentEvent) => void): (e: AgentEvent) => v
 		}
 		try { raw(event); } catch { /* ignore */ }
 	};
+}
+
+/** Resolves the effective thinking level / reasoning effort used during compaction summary. */
+export function resolveCompactionThinkingLevel(model: string, oauthKind?: string): string {
+	const provider = oauthKind || "";
+	const supported = getThinkingLevels(provider, model);
+	if (!supported || supported.length === 0) {
+		return "disabled";
+	}
+	if (provider === "antigravity" || /gemini/i.test(model)) {
+		return supported.includes("minimal") ? "minimal" : (supported.includes("low") ? "low" : supported[0]);
+	}
+	if (supported.includes("none")) {
+		return "disabled";
+	}
+	return supported.includes("low") ? "low" : (supported[0] ?? "disabled");
 }
 
 export async function runAgent(opts: RunAgentOptions): Promise<void> {
@@ -1039,14 +1056,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			return true;
 		};
 
-		// Summarize only the older working context; an earlier summary already lives
-		// there. Sending it separately as well would pay for and summarize it twice.
-		const summarizeSteps = async (steps: Step[]): Promise<string> => {
-			const sys =
-				"Summarize this coding session for the next working turn. Preserve user intent, constraints, " +
-				"decisions, changed file paths, test outcomes, errors, and unfinished work. Distinguish observed " +
-				"facts from assumptions. Keep archive references when relevant. Merge any existing summary once. " +
-				"Use concise bullets; omit narration, reasoning traces, and file bodies. Do not invent details.";
+		const resolveSummaryTarget = async () => {
 			const autoFastModel = !subagentModel && availableModels?.length && /^claude-opus-/i.test(model)
 				? availableModels.find(m => /^claude-(?:sonnet-4-6|sonnet-5|haiku-5|haiku-4-5)/i.test(m))
 				: undefined;
@@ -1063,25 +1073,48 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			const summaryModelParams = summaryConfig.modelParams
 				? { ...summaryConfig.modelParams, thinking: "disabled" as const, reasoningEffort: "low" as const }
 				: { thinking: "disabled" as const, reasoningEffort: "low" as const };
+			const summaryThinkingLevel = resolveCompactionThinkingLevel(summaryBareModel, summaryOAuthKind);
+			return {
+				summaryModel,
+				summaryConfig,
+				summaryBareModel,
+				summaryBaseUrl,
+				summaryApiKey,
+				summaryApiKeyPool,
+				summaryAnthropic,
+				summaryOAuthKind,
+				summaryModelParams,
+				summaryThinkingLevel,
+			};
+		};
+
+		// Summarize only the older working context; an earlier summary already lives
+		// there. Sending it separately as well would pay for and summarize it twice.
+		const summarizeSteps = async (steps: Step[], target: Awaited<ReturnType<typeof resolveSummaryTarget>>): Promise<string> => {
+			const sys =
+				"Summarize this coding session for the next working turn. Preserve user intent, constraints, " +
+				"decisions, changed file paths, test outcomes, errors, and unfinished work. Distinguish observed " +
+				"facts from assumptions. Keep archive references when relevant. Merge any existing summary once. " +
+				"Use concise bullets; omit narration, reasoning traces, and file bodies. Do not invent details.";
 			const summaryMaxTokens = 1536;
-			const summaryBudget = summaryConfig.contextTokens && summaryConfig.contextTokens > 0
-				? Math.floor((summaryConfig.contextTokens - summaryMaxTokens - 1024) / promptTokenRatio) - Math.ceil(sys.length / 4)
+			const summaryBudget = target.summaryConfig.contextTokens && target.summaryConfig.contextTokens > 0
+				? Math.floor((target.summaryConfig.contextTokens - summaryMaxTokens - 1024) / promptTokenRatio) - Math.ceil(sys.length / 4)
 				: 24000;
 			const transcript = clip(stepsToTranscript(steps), Math.max(256, Math.min(24000, summaryBudget) * 4));
 			let text = "";
 			for await (const ev of streamChat({
-				apiBaseUrl: summaryBaseUrl,
-				apiKey: summaryApiKey,
-				model: summaryBareModel,
-				apiKeyPool: summaryApiKeyPool,
+				apiBaseUrl: target.summaryBaseUrl,
+				apiKey: target.summaryApiKey,
+				model: target.summaryBareModel,
+				apiKeyPool: target.summaryApiKeyPool,
 				messages: [
 					{ role: "system", content: sys },
 					{ role: "user", content: transcript },
 				],
 				maxTokens: summaryMaxTokens,
-				modelParams: summaryModelParams,
-				anthropic: summaryAnthropic,
-				oauthKind: summaryOAuthKind,
+				modelParams: target.summaryModelParams,
+				anthropic: target.summaryAnthropic,
+				oauthKind: target.summaryOAuthKind,
 				signal,
 				maxRetries: 2,
 				promptCacheKey: `${opts.promptCacheKey ?? shellSessionKey}/summary`,
@@ -1090,7 +1123,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				if (ev.type === "usage") {
 					// Compression is billed too; include it in run usage without
 					// confusing its small prompt with the active context occupancy.
-					emit({ ...ev, type: "usage", model: ev.model ?? summaryBareModel, source: "summary", promptTokens: ev.promptTokens ?? 0, completionTokens: ev.completionTokens ?? 0, totalTokens: lastPrompt + lastCompletion });
+					emit({ ...ev, type: "usage", model: ev.model ?? target.summaryBareModel, source: "summary", promptTokens: ev.promptTokens ?? 0, completionTokens: ev.completionTokens ?? 0, totalTokens: lastPrompt + lastCompletion });
 				}
 			}
 			if (!text.trim()) throw new Error("empty summary");
@@ -1244,9 +1277,10 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				if (prefix.length >= 2 && gain >= Math.max(2048, fittingBudget * COMPACT_MIN_GAIN_FRAC)) {
 					lastCompactionStep = step; // Cool down failed summaries too.
 					onHook?.("preCompact", { dropped: String(prefix.length), reason: "auto-summarize" });
-					emit({ type: "compaction", status: "running" });
+					const summaryTarget = await resolveSummaryTarget();
+					emit({ type: "compaction", status: "running", model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
 					try {
-						const summary = await summarizeSteps(prefix);
+						const summary = await summarizeSteps(prefix, summaryTarget);
 						history.splice(0, history.length, {
 							kind: "user",
 							synthetic: true,
@@ -1257,10 +1291,10 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 						});
 						modelHistory = history;
 						contextReduced = true;
-						emit({ type: "compaction", status: "done", summary });
+						emit({ type: "compaction", status: "done", summary, model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
 						await onHook?.("postCompact", { summary }, undefined, signal);
 					} catch {
-						emit({ type: "compaction", status: "failed" });
+						emit({ type: "compaction", status: "failed", model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
 					}
 				}
 			}
