@@ -301,8 +301,10 @@ function applyFormat(fmt: ProtocolValue, body: ProtocolRecord, cfg: ProtocolValu
             break;
         }
         case "gemini-level": {
-            const level = none ? "minimal" : toGeminiThinkingLevel(eff);
-            setGeminiThinking(body, { thinkingLevel: level, includeThoughts: level !== "minimal" });
+            const minLevel = supportedLevels && !supportedLevels.includes("minimal") ? (supportedLevels.find((l: string) => l !== "none") || "low") : "minimal";
+            const rawLevel = none ? minLevel : toGeminiThinkingLevel(eff);
+            const level = rawLevel === "minimal" && minLevel !== "minimal" ? minLevel : rawLevel;
+            setGeminiThinking(body, { thinkingLevel: level, includeThoughts: !none && level !== "minimal" });
             ensureGeminiOutputFloor(body, geminiLevelOutputFloor(level), caps);
             break;
         }

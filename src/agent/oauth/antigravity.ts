@@ -9,6 +9,7 @@
 
 import { createHash, randomUUID } from "crypto";
 import { ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_IDE_VERSION } from "./protocols/providers/shared.js";
+import { getThinkingLevels } from "./protocols/providers/thinkingLevels.js";
 import type { ModelParams, SamplingParams } from "../provider/types";
 import type { ProviderEvent, ToolCall, ToolSchema, WireContentPart, WireMessage } from "../types";
 import { sseData } from "../provider/sse";
@@ -297,14 +298,21 @@ export function toAntigravityRequest(options: {
   const model = resolved.model;
   const maxOutputTokens = Math.min(Number.isFinite(options.maxTokens) && options.maxTokens! > 0 ? Math.floor(options.maxTokens!) : 8192, 64000);
   const generationConfig: Record<string, unknown> = { maxOutputTokens, temperature: options.temperature ?? 1 };
-  const effort = options.modelParams?.thinking === "disabled" ? "none" : options.modelParams?.reasoningEffort?.toLowerCase() ?? resolved.reasoningEffort;
+  const effort = options.modelParams?.thinking === "disabled"
+    ? (options.modelParams?.reasoningEffort?.toLowerCase() ?? "none")
+    : (options.modelParams?.reasoningEffort?.toLowerCase() ?? resolved.reasoningEffort);
   const thinkingConfig: Record<string, unknown> = { includeThoughts: true };
   if (effort && /^gemini-/i.test(model)) {
     if (requiresSignature(model)) {
-      const level = ["none", "off"].includes(effort) ? "minimal" : ["xhigh", "max", "auto"].includes(effort) ? "high" : effort;
+      const supported = getThinkingLevels("antigravity", model);
+      const supportsMinimal = !supported || supported.includes("minimal");
+      const minLevel = supportsMinimal ? "minimal" : (supported.find((l: string) => l !== "none") || "low");
+      let level = ["none", "off"].includes(effort) ? minLevel : ["xhigh", "max", "auto"].includes(effort) ? "high" : effort;
+      if (level === "minimal" && !supportsMinimal) level = minLevel;
       if (["minimal", "low", "medium", "high"].includes(level)) {
         thinkingConfig.thinkingLevel = level;
-        thinkingConfig.includeThoughts = level !== "minimal";
+        const disabled = options.modelParams?.thinking === "disabled" || ["none", "off"].includes(effort);
+        thinkingConfig.includeThoughts = !disabled && level !== "minimal";
       }
     } else if (/^gemini-2\.5/i.test(model)) {
       const budgets: Record<string, number> = { none: 0, off: 0, minimal: 512, low: 1024, medium: 8192, high: 24576, xhigh: 24576, max: 24576, auto: -1 };

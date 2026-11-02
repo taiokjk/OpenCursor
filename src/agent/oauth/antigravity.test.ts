@@ -197,6 +197,10 @@ describe("Antigravity request conversion", () => {
     expect(override.request.generationConfig.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "high" });
     const disabled = toAntigravityRequest({ ...base, model: "gemini-3.8-flash-low", modelParams: { thinking: "disabled" } });
     expect(disabled.request.generationConfig.thinkingConfig).toEqual({ includeThoughts: false, thinkingLevel: "minimal" });
+    const gemini4Disabled = toAntigravityRequest({ ...base, model: "gemini-4-argon", modelParams: { thinking: "disabled" } });
+    expect(gemini4Disabled.request.generationConfig.thinkingConfig).toEqual({ includeThoughts: false, thinkingLevel: "low" });
+    const gemini4Summary = toAntigravityRequest({ ...base, model: "gemini-4-argon", modelParams: { thinking: "disabled", reasoningEffort: "low" } });
+    expect(gemini4Summary.request.generationConfig.thinkingConfig).toEqual({ includeThoughts: false, thinkingLevel: "low" });
   });
 
   it("honors response limits, supported reasoning levels and sampling without adding OpenAI fields", () => {
