@@ -7,7 +7,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root.
  */
 
-import { createHash, randomBytes, randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import type { ToolSchema, WireMessage } from "../types";
 import type { ModelParams } from "../provider/types";
 import { toAnthropic } from "../provider/anthropicMessages";
@@ -71,9 +71,9 @@ const CLAUDE_CLI_HEADERS: Record<string, string> = {
 };
 
 /** cc_version=<ver>.<build>; cc_entrypoint=sdk-cli; cch=<sha256(body)[0:5]> */
-function billingHeader(body: unknown): string {
+function billingHeader(body: unknown, sessionId: string): string {
   const cch = createHash("sha256").update(JSON.stringify(body)).digest("hex").slice(0, 5);
-  const build = randomBytes(2).toString("hex").slice(0, 3);
+  const build = createHash("sha256").update(`build:${sessionId}`).digest("hex").slice(0, 3);
   return `${BILLING_PREFIX} cc_version=${CLAUDE_CLI_VERSION}.${build}; cc_entrypoint=${CC_ENTRYPOINT}; cch=${cch};`;
 }
 
@@ -174,7 +174,7 @@ export function buildClaudeMessagesRequest(accessToken: string, options: ClaudeM
   if (oauthToken) {
     // The billing block is system[0] and hashes the body as built so far; the
     // user id session matches x-claude-code-session-id.
-    system.unshift({ type: "text", text: billingHeader(body) });
+    system.unshift({ type: "text", text: billingHeader(body, sessionId) });
     body.metadata = { user_id: claudeUserId(accessToken, sessionId) };
   }
   return {

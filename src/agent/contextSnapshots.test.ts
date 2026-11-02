@@ -166,4 +166,27 @@ describe("mid-run steering", () => {
   it("is labelled as an update in compaction transcripts", () => {
     expect(stepsToTranscript([first(), { kind: "user", text: "Use tabs", steering: true }])).toContain("## User update (during the task)\nUse tabs");
   });
+
+  it("omits unchanged user_info, agent_skills, subagents, and capabilities XML sections when only rules change on a follow-up turn", () => {
+    const baseBlocks = [
+      "<user_info>\nOS Version: win32\n</user_info>",
+      "<agent_skills>\n<agent_skill fullPath=\"/skill.md\">Skill description</agent_skill>\n</agent_skills>",
+      "<subagents>\n- Explorer (read-only): Maps codebase\n</subagents>",
+      "<capabilities>\nBuilt-in tools currently available: Read, Grep.\n</capabilities>",
+    ];
+    const turn1Info = [baseBlocks[0], "<rules>\nRule A\n</rules>", ...baseBlocks.slice(1)].join("\n\n");
+    const turn2Info = [baseBlocks[0], "<rules>\nRule A\nRule B\n</rules>", ...baseBlocks.slice(1)].join("\n\n");
+    const c1 = snapshotUserContext({ userInfo: turn1Info, openFiles: "a.ts", timestamp: "t1" });
+    const c2 = snapshotUserContext({ userInfo: turn2Info, openFiles: "b.ts", timestamp: "t2" }, c1);
+    const wire = buildMessages("OpenCursor", [
+      { kind: "user", text: "First", context: c1 },
+      { kind: "assistant", text: "Done", calls: [] },
+      { kind: "user", text: "Second", context: c2 },
+    ]);
+    const secondTurnText = JSON.stringify(wire[3]);
+    expect(secondTurnText).toContain("Rule B");
+    expect(secondTurnText).not.toContain("<agent_skills>");
+    expect(secondTurnText).not.toContain("<subagents>");
+    expect(secondTurnText).not.toContain("<capabilities>");
+  });
 });

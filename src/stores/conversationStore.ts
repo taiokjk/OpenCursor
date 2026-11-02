@@ -15,7 +15,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { atomicWrite } from "./durableFiles";
 import { logError } from "../logging";
 import type { Step } from "../agent/types";
-import type { Turn } from "../shared/turns";
+import type { Mode, Turn } from "../shared/turns";
 import type { ContextState } from "../agent/contextState";
 import { forceSettleOpenWork, turnsToTranscript } from "../shared/turns";
 import type { ChatWorkspaceState, ConversationGoal, QueuedMessage, ReviewTarget } from "../shared/chatSession";
@@ -31,6 +31,10 @@ export interface Conversation {
   turns: Turn[];
   /** Persona/preset this conversation uses. */
   personaId?: string;
+  /** Selected model for this conversation tab. */
+  model?: string;
+  /** Selected agent mode for this conversation tab. */
+  mode?: Mode;
   /** Tokens consumed by the last run (drives the composer context ring). */
   usedTokens?: number;
   archivedAt?: number;
@@ -123,7 +127,7 @@ type StoreState = {
 // A single synchronous view per workspace prevents competing live sessions from
 // losing each other's changes while VS Code asynchronously flushes its Memento.
 const sharedStates = new WeakMap<vscode.Memento, StoreState>();
-type ConversationPatch = Partial<Pick<Conversation, "steps" | "contextState" | "turns" | "title" | "personaId" | "usedTokens" | "archivedAt" | "goal" | "queue" | "reviewTarget" | "runEvents" | "steeringQueue" | "steering" | "workspaceRoot" | "allowModelOutputEdits">>;
+type ConversationPatch = Partial<Pick<Conversation, "steps" | "contextState" | "turns" | "title" | "personaId" | "model" | "mode" | "usedTokens" | "archivedAt" | "goal" | "queue" | "reviewTarget" | "runEvents" | "steeringQueue" | "steering" | "workspaceRoot" | "allowModelOutputEdits">>;
 const BODY_KEYS = ["turns", "steps", "contextState", "runEvents"] as const;
 type StoredConversation = Conversation & { bodyInFile?: true; openRun?: true };
 
@@ -451,6 +455,8 @@ export class ConversationStore {
     }
     const ui = this.getWorkspaceState();
     delete ui.drafts[id];
+    if (ui.models) delete ui.models[id];
+    if (ui.modes) delete ui.modes[id];
     ui.openTabs = ui.openTabs.filter((tab) => tab !== id);
     await this.setWorkspaceState(ui);
   }
@@ -530,7 +536,12 @@ export class ConversationStore {
   getWorkspaceState(): ChatWorkspaceState {
     const stored = this.cache.ui;
     const existing = new Set(this.cache.conversations.map((c) => c.id));
-    return { openTabs: [...new Set(stored?.openTabs ?? [])].filter((id) => id === "" || existing.has(id)), drafts: structuredClone(stored?.drafts ?? {}) };
+    return {
+      openTabs: [...new Set(stored?.openTabs ?? [])].filter((id) => id === "" || existing.has(id)),
+      drafts: structuredClone(stored?.drafts ?? {}),
+      ...(stored?.models ? { models: structuredClone(stored.models) } : {}),
+      ...(stored?.modes ? { modes: structuredClone(stored.modes) } : {}),
+    };
   }
 
   async setWorkspaceState(patch: Partial<ChatWorkspaceState>): Promise<void> {
@@ -538,7 +549,10 @@ export class ConversationStore {
     const existing = new Set(this.cache.conversations.map((c) => c.id));
     // The cache owns its snapshot; only the caller's patch needs copying.
     this.cache.ui = {
-      openTabs: [...new Set(current?.openTabs ?? [])].filter((id) => id === "" || existing.has(id)), drafts: current?.drafts ?? {},
+      openTabs: [...new Set(current?.openTabs ?? [])].filter((id) => id === "" || existing.has(id)),
+      drafts: current?.drafts ?? {},
+      ...(current?.models ? { models: current.models } : {}),
+      ...(current?.modes ? { modes: current.modes } : {}),
       ...structuredClone(patch),
     };
     // Drafts arrive per keystroke: coalesce them into one storage write.

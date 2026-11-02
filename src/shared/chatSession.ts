@@ -40,11 +40,15 @@ export interface QueuedMessage {
   error?: string;
   /** Explicit resume reconciles possibly committed work before taking new actions. */
   resume?: boolean;
+  /** Resume directly from the last checkpoint without injecting a new user turn (429 out-of-quota path). */
+  resume429?: boolean;
 }
 
 export interface ChatWorkspaceState {
   openTabs: string[];
   drafts: Record<string, { text: string; attachments: Attachment[] }>;
+  models?: Record<string, string>;
+  modes?: Record<string, Mode>;
 }
 
 export type ReviewTarget =

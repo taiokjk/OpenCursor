@@ -333,6 +333,22 @@ export function snapshotUserContext(ctx: CursorContextBlocks, previous?: Pick<Us
   });
 }
 
+/** Omit unchanged static XML blocks (<user_info>, <agent_skills>, <subagents>, <capabilities>)
+ * on follow-up turns when only scoped <rules> changed. */
+function dedupStaticUserInfoSections(userInfo: string, seenSections: Set<string>): string {
+  const STATIC_TAGS = ["user_info", "agent_skills", "subagents", "capabilities"];
+  let result = userInfo;
+  for (const tag of STATIC_TAGS) {
+    const regex = new RegExp(`<${tag}>[\\s\\S]*?<\\/${tag}>`, "g");
+    result = result.replace(regex, (match) => {
+      if (seenSections.has(match)) return "";
+      seenSections.add(match);
+      return match;
+    });
+  }
+  return result.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 /**
  * Build provider messages with stable cacheable context blocks:
  * - system as a single cached text block
@@ -349,6 +365,7 @@ export function buildMessages(system: string, steps: Step[], ctx?: CursorContext
   // loop-injected system note, which would hide the request from <user_query>
   // and move the cached blocks on every nudge.
   const lastUserIdx = steps.length ? lastRealUserIndex(steps) : -1;
+  const seenStaticSections = new Set<string>();
 
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
@@ -379,7 +396,10 @@ export function buildMessages(system: string, steps: Step[], ctx?: CursorContext
 
       if (turnContext) {
         if (turnContext.userInfo && !turnContext.omitUserInfo) {
-          parts.push({ type: "text", text: turnContext.userInfo, cache_control: EPHEMERAL });
+          const dedupedUserInfo = dedupStaticUserInfoSections(turnContext.userInfo, seenStaticSections);
+          if (dedupedUserInfo) {
+            parts.push({ type: "text", text: dedupedUserInfo, cache_control: EPHEMERAL });
+          }
         }
         if (turnContext.openFiles && !turnContext.omitOpenFiles) {
           parts.push({ type: "text", text: turnContext.openFiles, cache_control: EPHEMERAL });

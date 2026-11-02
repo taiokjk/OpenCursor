@@ -900,4 +900,73 @@ describe("host-owned transcripts and model output edits", () => {
     expect(host._view.webview.postMessage).toHaveBeenCalledWith({ type: "insertMention", mention: { kind: "file", path: "a.ts", name: "a.ts" } });
     delete (vscode as any).window.activeTextEditor; delete (vscode as any).workspace;
   });
+
+  it("wakes an in-place quota wait immediately when resumeQuotaWait is received", async () => {
+    const { host, a } = await fixture();
+    const s = session();
+    host._sessions.set(a.id, s);
+    host._activeId = a.id;
+    const wait = host._waitForQuotaReset(s, Date.now() + 3_600_000, s.abort.signal);
+    host._resumeQuotaWait(a.id);
+    await expect(wait).resolves.toBe("manual");
+  });
+
+  it("resumes from checkpoint via resume429 without appending a duplicate user turn or reconciliation prompt", async () => {
+    const { host, store, a } = await fixture();
+    await store.update(a.id, {
+      turns: [
+        { role: "user", text: "Build the feature" },
+        { role: "assistant", blocks: [{ kind: "tool", callId: "c1", name: "Read", input: { path: "a.ts" }, status: "completed", result: "ok" }, { kind: "error", message: "claude-code 429" }], startedAt: 1, endedAt: 2 },
+      ],
+      steps: [
+        { kind: "user", text: "Build the feature" },
+        { kind: "assistant", text: "", calls: [{ id: "c1", name: "Read", arguments: '{"path":"a.ts"}' }] },
+        { kind: "tool-result", callId: "c1", name: "Read", output: "ok", status: "completed" },
+      ],
+      queue: [{ id: "q-429", text: "Build the feature", status: "interrupted", createdAt: 1 }],
+    });
+    vi.mocked(runAgent).mockResolvedValueOnce(undefined as any);
+    await host._queueAction(a.id, "q-429", "resume429" as any);
+    await host._queueWorkers.get(a.id);
+    expect(vi.mocked(runAgent)).toHaveBeenCalledOnce();
+    const callOpts = vi.mocked(runAgent).mock.calls[0][0];
+    expect(callOpts.resumeFromCheckpoint).toBe(true);
+    expect(callOpts.prompt).toBe("Build the feature");
+    expect(callOpts.prompt).not.toContain("Continue this interrupted request");
+    const saved = store.get(a.id)!;
+    expect(saved.turns.filter((t) => t.role === "user")).toHaveLength(1);
+  });
+
+  it("creates independent New Chat conversations and restores per-conversation model and mode on tab switch", async () => {
+    const { host, store, a, b } = await fixture();
+    await store.update(a.id, { model: "api::claude-opus-4-6", mode: "plan" });
+    await store.update(b.id, { model: "api::deepseek-reasoner", mode: "agent" });
+
+    await host._selectConversation(a.id);
+    expect(host._view.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "loadConversation",
+      activeId: a.id,
+      selectedModel: "api::claude-opus-4-6",
+      mode: "plan",
+    }));
+
+    await host._selectConversation(b.id);
+    expect(host._view.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "loadConversation",
+      activeId: b.id,
+      selectedModel: "api::deepseek-reasoner",
+      mode: "agent",
+    }));
+
+    await host._newConversation();
+    const created1 = host._activeId;
+    expect(created1).toBeTruthy();
+    expect(created1).not.toBe(a.id);
+    expect(created1).not.toBe(b.id);
+
+    await host._newConversation();
+    const created2 = host._activeId;
+    expect(created2).toBeTruthy();
+    expect(created2).not.toBe(created1);
+  });
 });

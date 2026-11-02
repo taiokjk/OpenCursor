@@ -14,6 +14,7 @@ import { Icon, type IconName } from "../../shared/icons";
 import { usePresence } from "../../shared/usePresence";
 import { TextSwap } from "../../shared/TextTransitions";
 import { renderMentionTokens } from "../types";
+import { InlineModelPicker } from "./Tool";
 
 export interface QueuedMessageRowProps {
   item: QueuedMessage;
@@ -21,13 +22,15 @@ export interface QueuedMessageRowProps {
   steering?: boolean;
   canMoveUp: boolean;
   onSteer: () => void;
-  onRun: () => void;
+  onRun: (model?: string) => void;
+  onResume429?: (model?: string) => void;
   onEdit: () => void;
   onRemove: () => void;
   onMoveUp: () => void;
 }
 
-export function QueuedMessageRow({ item, running, steering = false, canMoveUp, onSteer, onRun, onEdit, onRemove, onMoveUp }: QueuedMessageRowProps) {
+export function QueuedMessageRow({ item, running, steering = false, canMoveUp, onSteer, onRun, onResume429, onEdit, onRemove, onMoveUp }: QueuedMessageRowProps) {
+  const [resumeModel, setResumeModel] = React.useState<string>("");
   const menuId = React.useId();
   const trigger = React.useRef<HTMLButtonElement>(null);
   const menu = React.useRef<HTMLDivElement>(null);
@@ -144,10 +147,17 @@ export function QueuedMessageRow({ item, running, steering = false, canMoveUp, o
         title={steering ? "Waiting for the agent to apply this message" : item.attachments?.length ? "Use Send now for a message with attachments" : "Steer the current run without stopping it"}
         aria-label={steering ? "Steering message" : "Steer current run with queued message"} disabled={steering || !!item.attachments?.length || !item.text.trim()} onClick={onSteer}>
         {steering ? <span className="spinner" aria-hidden="true" /> : <Icon name="steer" size={12} />}<TextSwap text={steering ? "Steering…" : "Steer"} />
-      </button> : <button type="button" className="q-btn q-btn-primary"
-        title={queued ? "Send queued request now" : "Resume and reconcile completed work"} aria-label={runLabel} onClick={onRun}>
-        <Icon name="play" size={12} /><span>{queued ? "Send" : "Resume"}</span>
-      </button>}
+      </button> : <>
+        {!queued && <InlineModelPicker selected={resumeModel || item.model || ""} onSelect={setResumeModel} />}
+        <button type="button" className="q-btn q-btn-primary"
+          title={queued ? "Send queued request now" : "Resume and reconcile completed work"} aria-label={runLabel} onClick={() => onRun(resumeModel || undefined)}>
+          <Icon name="play" size={12} /><span>{queued ? "Send" : "Resume"}</span>
+        </button>
+        {!queued && <button type="button" className="q-btn q-btn-primary"
+          title="Continue execution directly from the last checkpoint (429 quota reset)" aria-label="Resume b/c 429" onClick={() => (onResume429 ?? onRun)(resumeModel || undefined)}>
+          <Icon name="clock" size={12} /><span>Resume b/c 429</span>
+        </button>}
+      </>}
       <button type="button" className="q-btn" title="Remove queued message" aria-label="Remove queued message" disabled={steering} onClick={onRemove}>
         <Icon name="trash" size={12} />
       </button>

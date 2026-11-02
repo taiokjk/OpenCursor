@@ -18,12 +18,12 @@ import { spawn } from "child_process";
 import { getWorkspaceRoot } from "./workspaceUtils";
 import { search as searchCodebase } from "../agent/semanticIndex";
 import { type DocSource } from "../agent/docsIndex";
-import { listRules } from "./workspaceContext";
+import { listRules, listSkills, type SkillInfo } from "./workspaceContext";
 import { scanFilesCached, scorePath } from "../agent/tools/fileScan";
 
 export type MentionKind =
   | "file" | "folder" | "code" | "doc" | "git" | "composer"
-  | "terminal" | "rule" | "branch_diff" | "link";
+  | "terminal" | "rule" | "branch_diff" | "link" | "skill";
 
 export interface MentionItem {
   kind: MentionKind;
@@ -173,6 +173,33 @@ export async function searchRules(query: string): Promise<MentionItem[]> {
     .map((r) => ({ kind: "rule" as const, path: r.file, name: r.file.replace(/\.mdc?$/, ""), detail: r.description || "rule" }));
 }
 
+/** `/`-invoked skills: name-prefix matches first, then name/description substring matches. */
+export async function searchSkills(query: string, limit = 20): Promise<MentionItem[]> {
+  const q = (query || "").toLowerCase();
+  const skills = await listSkills();
+  const rank = (s: SkillInfo) => s.name.toLowerCase().startsWith(q) ? 0 : s.name.toLowerCase().includes(q) ? 1 : 2;
+  return skills
+    .filter((s) => !q || rank(s) < 2 || s.description.toLowerCase().includes(q))
+    .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+    .slice(0, limit)
+    .map((s) => ({ kind: "skill" as const, path: s.path, name: s.name, detail: s.description.slice(0, 160) || "skill" }));
+}
+
+const samePath = (a: string, b: string) => {
+  const norm = (p: string) => path.resolve(p).replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b);
+};
+
+/**
+ * Only discovered skills resolve: the mention tag is user-editable text, so its
+ * path is a lookup key, never a file to read blindly.
+ */
+export async function findSkill(mention: { name: string; path: string }): Promise<SkillInfo | undefined> {
+  const skills = await listSkills();
+  return skills.find((s) => samePath(s.path, mention.path))
+    ?? skills.find((s) => s.name.toLowerCase() === (mention.name || "").toLowerCase());
+}
+
 export async function searchCode(query: string, limit = 10): Promise<MentionItem[]> {
   if (!query.trim()) return [];
   try {
@@ -195,6 +222,9 @@ export function branchDiffItem(): MentionItem {
 // ---- Resolution (mention → context block) ----
 
 const MAX_BLOCK = 8000;
+// Skills are instructions the user explicitly asked to follow, so they get a far
+// larger budget than incidental context; the rest stays reachable via Read.
+const MAX_SKILL_BLOCK = 64_000;
 
 async function readFileSafe(rel: string, range?: { start: number; end: number }): Promise<string> {
   try {
@@ -275,6 +305,16 @@ export async function resolveMentions(
         case "link": {
           // Pointer only — the agent fetches on demand via the WebFetch tool.
           blocks.push(`<attached_link url="${m.path}">The user attached this link. Use the WebFetch tool to read its content if needed.</attached_link>`);
+          break;
+        }
+        case "skill": {
+          const skill = await findSkill(m);
+          if (!skill) break;
+          const raw = await fs.readFile(skill.path, "utf8");
+          const body = raw.length > MAX_SKILL_BLOCK
+            ? raw.slice(0, MAX_SKILL_BLOCK) + `\n[Skill truncated; use Read on ${skill.path} for the rest.]`
+            : raw;
+          blocks.push(`<attached_skill name="${skill.name}" path="${skill.path}">\nThe user invoked this skill for this request. Read and follow its instructions; resolve relative file references against the skill's directory.\n\n${body}\n</attached_skill>`);
           break;
         }
         // file/folder mentions stay inline as @path — the agent reads them itself.

@@ -9,7 +9,8 @@
 
 import { streamChat, SamplingParams, ModelParams } from "./provider";
 import { responseTokenReservation } from "./providerLimits";
-import type { OAuthKind } from "./oauth";
+import { clearOAuthCooldowns, getOAuthQuotaLimits, type OAuthKind } from "./oauth";
+import { DEFAULT_QUOTA_BACKOFF_MS, MAX_QUOTA_RETRIES, resolveQuotaResumeAt, waitUntilQuotaResumeAt } from "./quotaRetry";
 import { OAUTH_PROVIDER_DEFINITIONS, supportsOAuthTools } from "../shared/oauthProviders";
 import { noteUserActivity } from "./semanticIndex";
 import { TOOLS, schemasForMode, toolsForMode, disposeShellSession, EDIT_TOOLS, MULTITASK_TOOLS, toolTimeoutMs, withToolTimeout, type AskQuestionItem, type ToolContext } from "./tools";
@@ -330,17 +331,113 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 	return withWorkspaceRoot(opts.workspaceRoot, () => withExecutionProfile(opts.executionProfile ?? configuredExecutionProfile(), getWorkspaceRoot(), () => runAgentInWorkspace(opts)));
 }
 
+const INTERRUPTED_STOP_NOTE = "The user stopped the previous run. Earlier tool calls and results retain the observations and outcomes already recorded; the last assistant response may be incomplete. Continue from that evidence when requested, checking only unfinished or potentially changed work.";
+const CHECKPOINT_CONTINUE_NOTE = "Continue from the last checkpoint without repeating completed work.";
+
+function isInterruptedToolResult(step: Step, collaborators: Collaborator[]): boolean {
+	if (step.kind !== "tool-result") return false;
+	const out = step.output.trim();
+	if (
+		out === "(subagent cancelled)" ||
+		out.endsWith("\n(subagent cancelled)") ||
+		out.startsWith("(subagent failed:") ||
+		out.includes("\n(subagent failed:") ||
+		out === "error: run interrupted before a result was recorded; completion is unconfirmed. Verify the current state before retrying any action." ||
+		out === "error: cancelled before tool execution"
+	) {
+		return true;
+	}
+	if ((step.name === "Task" || step.name === "task") && collaborators.some(c => c.id === step.callId && (c.status === "interrupted" || c.status === "failed") && !out.startsWith("Launched "))) {
+		return true;
+	}
+	return false;
+}
+
+function prepareCheckpointResume(persistedHistory: Step[], collaborators: Collaborator[]): { pendingCalls: ToolCall[]; backgroundCalls: ToolCall[]; resumeFromIndex: number } {
+	while (persistedHistory.length > 0) {
+		const tail = persistedHistory[persistedHistory.length - 1];
+		if (
+			tail.kind === "user" &&
+			tail.synthetic &&
+			(tail.text === INTERRUPTED_STOP_NOTE ||
+				tail.text === CHECKPOINT_CONTINUE_NOTE ||
+				/^Task \S+ \([\s\S]*\): \(subagent (?:cancelled|failed:)/.test(tail.text.trim()))
+		) {
+			persistedHistory.pop();
+			continue;
+		}
+		break;
+	}
+	let lastAsstIdx = -1;
+	for (let i = persistedHistory.length - 1; i >= 0; i--) {
+		const s = persistedHistory[i];
+		if (s.kind === "assistant") {
+			lastAsstIdx = i;
+			break;
+		}
+		if (s.kind === "user" && !s.synthetic) {
+			break;
+		}
+	}
+	const pendingCalls: ToolCall[] = [];
+	if (lastAsstIdx >= 0) {
+		for (let i = persistedHistory.length - 1; i > lastAsstIdx; i--) {
+			if (isInterruptedToolResult(persistedHistory[i], collaborators)) {
+				persistedHistory.splice(i, 1);
+			}
+		}
+		const asst = persistedHistory[lastAsstIdx] as Extract<Step, { kind: "assistant" }>;
+		const answered = new Set<string>();
+		for (let i = lastAsstIdx + 1; i < persistedHistory.length; i++) {
+			const s = persistedHistory[i];
+			if (s.kind === "tool-result") answered.add(s.callId);
+		}
+		for (const c of asst.calls) {
+			if (!answered.has(c.id)) pendingCalls.push(c);
+		}
+	}
+	const backgroundCalls: ToolCall[] = [];
+	const pendingIds = new Set(pendingCalls.map(c => c.id));
+	for (const collab of collaborators) {
+		if ((collab.status !== "interrupted" && collab.status !== "failed") || collab.history.length === 0 || pendingIds.has(collab.id)) continue;
+		const launchedIdx = persistedHistory.findIndex(s => s.kind === "tool-result" && s.callId === collab.id && s.output.startsWith("Launched "));
+		if (launchedIdx < 0) continue;
+		const alreadyReported = persistedHistory.slice(launchedIdx + 1).some(s => s.kind === "user" && s.synthetic && s.text.includes(`(task ${collab.id})`));
+		if (alreadyReported) continue;
+		for (let i = launchedIdx - 1; i >= 0; i--) {
+			const s = persistedHistory[i];
+			if (s.kind === "assistant") {
+				const found = s.calls.find(c => c.id === collab.id);
+				if (found) {
+					backgroundCalls.push(found);
+					break;
+				}
+			}
+		}
+	}
+	return { pendingCalls, backgroundCalls, resumeFromIndex: pendingCalls.length > 0 && lastAsstIdx >= 0 ? lastAsstIdx : persistedHistory.length };
+}
+
 async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
-	const { apiBaseUrl, apiKey, model, prompt, attachments, history: persistedHistory, maxTokens, maxSteps, autoContinue, contextTokens, sampling, modelParams, anthropic, oauthKind, systemPromptOverride, extraInstructions, enableFileReading, enableTerminalSuggestions, enableWorkspaceContext, approve, isSubagent, customSubagents, teams, activeTeamIds, subagentModel, availableModels, registerSubagentAbort, askUser, onAfterRun, onBeforeShell, onAfterEdit, onHook, signal, emit: rawEmit } = opts;
-	const chatOnly = !!oauthKind && !supportsOAuthTools(oauthKind);
+	const { prompt, attachments, history: persistedHistory, maxSteps, autoContinue, systemPromptOverride, extraInstructions, enableFileReading, enableTerminalSuggestions, enableWorkspaceContext, approve, isSubagent, customSubagents, teams, activeTeamIds, subagentModel, availableModels, registerSubagentAbort, askUser, onAfterRun, onBeforeShell, onAfterEdit, onHook, signal, emit: rawEmit } = opts;
+	let { apiBaseUrl, apiKey, model, apiKeyPool, maxTokens, contextTokens, sampling, modelParams, anthropic, oauthKind } = opts;
+	let chatOnly = !!oauthKind && !supportsOAuthTools(oauthKind);
 	const chatOnlyCapabilities = "<capabilities>\nThis provider supports chat only. No tools are available. MCP execution is unavailable. Answer using the supplied conversation, attachments and context. Do not request tools, invent tool results, or claim to have read files, executed commands or changed resources. Describe any proposed changes for the user to apply.\n</capabilities>";
+	const collaborators: Collaborator[] = opts.contextState?.agents ?? [];
+	if (opts.contextState) opts.contextState.agents = collaborators;
+	for (const agent of collaborators) if (agent.status === "running") agent.status = "interrupted";
+	const checkpointResume = opts.resumeFromCheckpoint && persistedHistory.length > 0
+		? prepareCheckpointResume(persistedHistory, collaborators)
+		: { pendingCalls: [] as ToolCall[], backgroundCalls: [] as ToolCall[], resumeFromIndex: persistedHistory.length };
+	const pendingResumeCalls = checkpointResume.pendingCalls;
+	const pendingBgResumeCalls = checkpointResume.backgroundCalls;
 	// Model history is disposable and may be compacted when the window fills.
 	// Persisted history remains lossless for chat display/export, including full
 	// tool output/thinking. Shallow clone suffices: economizeHistory/stripThinking
 	// replaces entries via spread (never mutates originals), and new steps are
 	// pushed as fresh objects.
 	const history: Step[] = restoreContext(persistedHistory, opts.contextState);
-	const runStart = persistedHistory.length;
+	const runStart = checkpointResume.resumeFromIndex;
 	const archive = new ContextArchive();
 	archive.prepareSteps(persistedHistory);
 	let deferredTools: DeferredToolSchemas | undefined;
@@ -380,9 +477,6 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			: undefined;
 	const roster = teamRoster?.length ? teamRoster : customSubagents;
 	const background = new BackgroundTasks();
-	const collaborators: Collaborator[] = opts.contextState?.agents ?? [];
-	if (opts.contextState) opts.contextState.agents = collaborators;
-	for (const agent of collaborators) if (agent.status === "running") agent.status = "interrupted";
 	const activeAgents = new Map<string, { abort: AbortController; promise: Promise<void> }>();
 	let childSequence = 0;
 	const started = Date.now();
@@ -458,28 +552,57 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 	if (!isSubagent) {
 		// Subagent runner for the `task` tool (top-level runs only).
 		toolCtx.runSubagent = async (subPrompt, readonly, subagentName, subSignal, callId, taskOpts) => {
-			const resumed = taskOpts?.resume ? collaborators.find(agent => agent.id === taskOpts.resume) : undefined;
+			const autoResumed = !taskOpts?.resume && callId
+				? collaborators.find(agent => agent.id === callId && (agent.status === "interrupted" || agent.status === "failed") && agent.history.length > 0)
+				: undefined;
+			const resumed = (taskOpts?.resume ? collaborators.find(agent => agent.id === taskOpts.resume) : undefined) ?? autoResumed;
 			if (taskOpts?.resume && !resumed) return "error: unknown collaborator ID in this conversation";
 			if (resumed && activeAgents.has(resumed.id)) { resumed.mailbox.push(subPrompt); return `Message queued for active collaborator ${resumed.id}`; }
 			const def = subagentName ? findSubagentByName(roster, subagentName) : undefined;
 			const subReadonly = inheritedReadOnly || mode === "ask" || mode === "plan" || readonly || def?.readonly === true || resumed?.readonly === true;
 			const subSystemOverride = def ? def.prompt : systemPromptOverride;
-			// Model precedence: explicit task model → per-subagent override → global subagent model → chat model.
+			// Model precedence: resumed model override → explicit task model → per-subagent override → global subagent model → chat model.
 			// Models the agent invents (or that belong to another provider) would fail
 			// against this run's endpoint, so only honour ids the provider actually offers.
+			const stripScope = (v: string) => (v.includes("::") ? v.slice(v.indexOf("::") + 2) : v);
 			const known = (id: string | undefined): string | undefined => {
 				if (!id) return undefined;
-				if (!availableModels?.length) return id;
-				return availableModels.some((m) => m.toLowerCase() === id.toLowerCase()) ? id : undefined;
+				if (!availableModels?.length) {
+					return id.startsWith("__oauth__:") ? undefined : id;
+				}
+				const exact = availableModels.find((m) => m.toLowerCase() === id.toLowerCase());
+				if (exact) return exact;
+				if (!id.includes("::")) {
+					const byBare = availableModels.find((m) => stripScope(m).toLowerCase() === id.toLowerCase());
+					if (byBare) return byBare;
+				}
+				const bare = stripScope(id).toLowerCase();
+				if (bare.startsWith("gemini-")) {
+					const geminiFallbacks = [
+						"__oauth__:antigravity::gemini-4-argon-high",
+						"__oauth__:antigravity::gemini-4-argon-medium",
+						"__oauth__:antigravity::gemini-3.8-flash-high",
+						"__oauth__:antigravity::gemini-3.8-flash-medium",
+						"__oauth__:antigravity::gemini-3.8-flash",
+						"__oauth__:antigravity::gemini-3-flash-agent",
+						"__oauth__:antigravity::gemini-3-flash",
+						"__oauth__:claude-code::claude-sonnet-5-5",
+					];
+					for (const fb of geminiFallbacks) {
+						const found = availableModels.find((m) => m.toLowerCase() === fb.toLowerCase() || stripScope(m).toLowerCase() === stripScope(fb).toLowerCase());
+						if (found) return found;
+					}
+				}
+				return undefined;
 			};
-			const subModel = known(taskOpts?.model) || known(def?.model) || known(subagentModel) || model;
+			const subModel = known(resumed?.model) || known(taskOpts?.model) || known(def?.model) || known(subagentModel) || model;
 			// Surface the resolved model on the Task card even when the call didn't name one.
 			if (callId) {
 				emit({
 					type: "tool-call-started",
 					callId,
 					name: "Task",
-					input: { model: subModel },
+					input: { model: stripScope(subModel) },
 				});
 			}
 			// Attach any provided files to the subagent prompt as context.
@@ -501,7 +624,14 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				userRequests: parentRequests,
 				summary: parentSummary?.kind === "user" ? clip(parentSummary.text, 4000) : undefined,
 			};
-			const childConfig = subModel === model ? { contextTokens, maxTokens, sampling, modelParams } : opts.resolveModelOptions?.(subModel) ?? {};
+			const resolvedChild = opts.resolveModelOptions ? await opts.resolveModelOptions(subModel) : undefined;
+			const childConfig = resolvedChild ?? (subModel === model ? { contextTokens, maxTokens, sampling, modelParams } : {});
+			const childBareModel = childConfig.model ?? stripScope(subModel);
+			const childBaseUrl = childConfig.apiBaseUrl !== undefined ? childConfig.apiBaseUrl : apiBaseUrl;
+			const childApiKey = childConfig.apiKey !== undefined ? childConfig.apiKey : apiKey;
+			const childApiKeyPool = "apiKeyPool" in childConfig ? childConfig.apiKeyPool : apiKeyPool;
+			const childAnthropic = childConfig.anthropic !== undefined ? childConfig.anthropic : anthropic;
+			const childOAuthKind = "oauthKind" in childConfig ? childConfig.oauthKind : oauthKind;
 			// Per-subagent abort: child controller linked to the parent signal so the
 			// user can stop just this subagent and return to the parent.
 			const childAC = new AbortController();
@@ -531,13 +661,14 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				budgetExhausted,
 				onGoalStatus: status => { if (status !== "active" && status !== "complete") childPauseReason = `paused: ${status}`; },
 				drainSteering: () => collaborator.mailbox.splice(0).map(message => `Parent agent message:\n${message}`),
-				apiBaseUrl,
-				apiKey,
-				model: subModel,
-				apiKeyPool: opts.apiKeyPool,
+				apiBaseUrl: childBaseUrl,
+				apiKey: childApiKey,
+				model: childBareModel,
+				apiKeyPool: childApiKeyPool,
 				mode: subReadonly ? "ask" : "agent",
 				prompt: subPrompt,
 				history: collaborator.history,
+				resumeFromCheckpoint: Boolean(autoResumed),
 				maxTokens: childConfig.maxTokens,
 				maxSteps,
 				autoContinue,
@@ -546,8 +677,8 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				modelParams: childConfig.modelParams,
 				promptCacheKey: `${opts.promptCacheKey ?? shellSessionKey}/task/${childId}`,
 				shellOwnerKey: toolCtx.shellOwnerKey,
-				anthropic,
-				oauthKind,
+				anthropic: childAnthropic,
+				oauthKind: childOAuthKind,
 				systemPromptOverride: subSystemOverride,
 				enableFileReading,
 				enableTerminalSuggestions,
@@ -556,6 +687,24 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				enableWebFetch: webFetchEnabled,
 				changeOwner,
 				approve,
+				resolveModelOptions: opts.resolveModelOptions,
+				waitForQuotaReset: opts.waitForQuotaReset
+					? async (resumeAt, sig) => {
+						const res = await opts.waitForQuotaReset!(resumeAt, sig, callId);
+						if (typeof res === "object" && res.model) {
+							collaborator.model = res.model;
+							if (callId) {
+								emit({
+									type: "tool-call-started",
+									callId,
+									name: "Task",
+									input: { model: stripScope(res.model) },
+								});
+							}
+						}
+						return res;
+					}
+					: undefined,
 				isSubagent: true,
 				inheritedContext,
 				// Nested Task disabled; child still needs hooks for compaction etc.
@@ -785,16 +934,23 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 	cursorCtx = { ...cursorCtx, userInfo: `${baseUserInfo}\n\n${capabilityText()}`.trim() };
 	const previousContext = [...history].reverse().find((s) => s.kind === "user" && !s.synthetic && s.context);
 	if (enableWorkspaceContext !== false) for (const rule of await scopedInstructionsForPaths([])) instructionFingerprints.add(rule.fingerprint);
-	pushHistory({ kind: "user", text: prompt,
-		attachments: attachments?.length ? attachments.map(a => ({ ...a })) : undefined,
-		context: snapshotUserContext({ ...cursorCtx, timestamp: runTimestamp, reminder: mode === "multitask" ? MULTITASK_REMINDER : mode === "project" ? PROJECT_REMINDER : undefined }, previousContext?.kind === "user" ? previousContext.context : undefined),
-	});
-	if (previousContext?.kind === "user" && previousContext.context) {
-		if (previousContext.context.userInfo !== cursorCtx.userInfo) {
-			pushSystemNote("The workspace and rule snapshot attached to the latest user turn replaces earlier environment snapshots. Instructions in the user's conversation remain applicable until explicitly superseded.");
+	if (opts.resumeFromCheckpoint && history.length > 0) {
+		const tail = history[history.length - 1];
+		if (tail?.kind === "assistant" && !tail.calls?.length) {
+			pushSystemNote("Continue from the last checkpoint without repeating completed work.");
 		}
-		if (previousContext.context.openFiles && !cursorCtx.openFiles) {
-			pushSystemNote("No editor context is supplied for this turn; earlier editor snapshots are historical.");
+	} else {
+		pushHistory({ kind: "user", text: prompt,
+			attachments: attachments?.length ? attachments.map(a => ({ ...a })) : undefined,
+			context: snapshotUserContext({ ...cursorCtx, timestamp: runTimestamp, reminder: mode === "multitask" ? MULTITASK_REMINDER : mode === "project" ? PROJECT_REMINDER : undefined }, previousContext?.kind === "user" ? previousContext.context : undefined),
+		});
+		if (previousContext?.kind === "user" && previousContext.context) {
+			if (previousContext.context.userInfo !== cursorCtx.userInfo) {
+				pushSystemNote("The workspace and rule snapshot attached to the latest user turn replaces earlier environment snapshots. Instructions in the user's conversation remain applicable until explicitly superseded.");
+			}
+			if (previousContext.context.openFiles && !cursorCtx.openFiles) {
+				pushSystemNote("No editor context is supplied for this turn; earlier editor snapshots are historical.");
+			}
 		}
 	}
 	let settledEmitted = false;
@@ -811,9 +967,11 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 	// it massively since every step resends the whole conversation).
 	let lastPrompt = 0;
 	let lastCompletion = 0;
+	let quotaWaitedMs = 0;
 	// Calibrate the character estimate from actual provider usage without using
 	// stale occupancy from before compaction to trigger another summary.
-	let promptTokenRatio = 1;
+	let promptTokenRatio = Math.max(1, opts.contextState?.promptTokenRatio ?? 1);
+	const cacheExpiredAtStart = Boolean(opts.contextState?.lastPromptAt && Date.now() - opts.contextState.lastPromptAt >= 300_000);
 	const responseTokens = responseTokenReservation({ model, apiBaseUrl, maxTokens, anthropic, oauthKind, modelParams });
 
 	try {
@@ -889,8 +1047,22 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				"decisions, changed file paths, test outcomes, errors, and unfinished work. Distinguish observed " +
 				"facts from assumptions. Keep archive references when relevant. Merge any existing summary once. " +
 				"Use concise bullets; omit narration, reasoning traces, and file bodies. Do not invent details.";
-			const summaryModel = subagentModel && (!availableModels?.length || availableModels.some(m => m.toLowerCase() === subagentModel.toLowerCase())) ? subagentModel : model;
-			const summaryConfig = summaryModel === model ? { contextTokens, modelParams } : opts.resolveModelOptions?.(summaryModel) ?? {};
+			const autoFastModel = !subagentModel && availableModels?.length && /^claude-opus-/i.test(model)
+				? availableModels.find(m => /^claude-(?:sonnet-4-6|sonnet-5|haiku-5|haiku-4-5)/i.test(m))
+				: undefined;
+			const summaryModel = subagentModel && (!availableModels?.length || availableModels.some(m => m.toLowerCase() === subagentModel.toLowerCase()))
+				? subagentModel
+				: autoFastModel ?? model;
+			const summaryConfig = summaryModel === model ? { contextTokens, modelParams } : (await opts.resolveModelOptions?.(summaryModel)) ?? {};
+			const summaryBareModel = summaryConfig.model ?? (summaryModel.includes("::") ? summaryModel.slice(summaryModel.indexOf("::") + 2) : summaryModel);
+			const summaryBaseUrl = summaryConfig.apiBaseUrl !== undefined ? summaryConfig.apiBaseUrl : apiBaseUrl;
+			const summaryApiKey = summaryConfig.apiKey !== undefined ? summaryConfig.apiKey : apiKey;
+			const summaryApiKeyPool = "apiKeyPool" in summaryConfig ? summaryConfig.apiKeyPool : apiKeyPool;
+			const summaryAnthropic = summaryConfig.anthropic !== undefined ? summaryConfig.anthropic : anthropic;
+			const summaryOAuthKind = "oauthKind" in summaryConfig ? summaryConfig.oauthKind : oauthKind;
+			const summaryModelParams = summaryConfig.modelParams
+				? { ...summaryConfig.modelParams, thinking: "disabled" as const, reasoningEffort: "low" as const }
+				: { thinking: "disabled" as const, reasoningEffort: "low" as const };
 			const summaryMaxTokens = 1536;
 			const summaryBudget = summaryConfig.contextTokens && summaryConfig.contextTokens > 0
 				? Math.floor((summaryConfig.contextTokens - summaryMaxTokens - 1024) / promptTokenRatio) - Math.ceil(sys.length / 4)
@@ -898,18 +1070,18 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			const transcript = clip(stepsToTranscript(steps), Math.max(256, Math.min(24000, summaryBudget) * 4));
 			let text = "";
 			for await (const ev of streamChat({
-				apiBaseUrl,
-				apiKey,
-				model: summaryModel,
-				apiKeyPool: opts.apiKeyPool,
+				apiBaseUrl: summaryBaseUrl,
+				apiKey: summaryApiKey,
+				model: summaryBareModel,
+				apiKeyPool: summaryApiKeyPool,
 				messages: [
 					{ role: "system", content: sys },
 					{ role: "user", content: transcript },
 				],
 				maxTokens: summaryMaxTokens,
-				modelParams: summaryConfig.modelParams,
-				anthropic,
-				oauthKind,
+				modelParams: summaryModelParams,
+				anthropic: summaryAnthropic,
+				oauthKind: summaryOAuthKind,
 				signal,
 				maxRetries: 2,
 				promptCacheKey: `${opts.promptCacheKey ?? shellSessionKey}/summary`,
@@ -918,7 +1090,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				if (ev.type === "usage") {
 					// Compression is billed too; include it in run usage without
 					// confusing its small prompt with the active context occupancy.
-					emit({ ...ev, type: "usage", model: ev.model ?? summaryModel, source: "summary", promptTokens: ev.promptTokens ?? 0, completionTokens: ev.completionTokens ?? 0, totalTokens: lastPrompt + lastCompletion });
+					emit({ ...ev, type: "usage", model: ev.model ?? summaryBareModel, source: "summary", promptTokens: ev.promptTokens ?? 0, completionTokens: ev.completionTokens ?? 0, totalTokens: lastPrompt + lastCompletion });
 				}
 			}
 			if (!text.trim()) throw new Error("empty summary");
@@ -976,6 +1148,33 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 
 			// Any background subagents that finished while the model was busy? Report
 			// them now so it never reasons about "still running" work that's done.
+			if (step === 0 && pendingBgResumeCalls.length > 0 && toolCtx.runSubagent) {
+				for (const bgCall of pendingBgResumeCalls.splice(0)) {
+					try {
+						const bgInput = JSON.parse(bgCall.arguments || "{}");
+						await toolCtx.runSubagent(
+							String(bgInput.prompt || ""),
+							Boolean(bgInput.readonly),
+							typeof bgInput.subagent_type === "string" ? bgInput.subagent_type : undefined,
+							signal,
+							bgCall.id,
+							{
+								description: typeof bgInput.description === "string" ? bgInput.description : undefined,
+								model: typeof bgInput.model === "string" ? bgInput.model : undefined,
+								fileAttachments: Array.isArray(bgInput.file_attachments) ? bgInput.file_attachments : undefined,
+								runInBackground: true,
+							},
+						);
+					} catch { /* ignore invalid bg resume args */ }
+				}
+				if (pendingResumeCalls.length === 0 && bgPending()) {
+					await awaitPendingBg();
+					if (signal.aborted) {
+						emitSettled("cancelled");
+						return;
+					}
+				}
+			}
 			flushSettledBg();
 			refreshCapabilities();
 
@@ -989,6 +1188,17 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 					}
 				} catch { /* context is best-effort */ }
 			}
+			const activeTools = schemasFor(mode);
+			const calls: ToolCall[] = [];
+			let assistantText = "";
+			let thinking = "";
+			let responsesReasoning: ResponsesReasoning | undefined;
+			let chatReasoning: ChatReasoning | undefined;
+			let finishReason = "";
+			const resumedPendingStep = step === 0 && pendingResumeCalls.length > 0;
+			if (resumedPendingStep) {
+				calls.push(...pendingResumeCalls.splice(0));
+			} else {
 			const limitedContext = !!contextTokens && contextTokens > 0;
 			const budget = limitedContext
 				? Math.max(0, contextTokens! - responseTokens - 1024)
@@ -1007,18 +1217,23 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 
 			// Keep completed tool exchanges verbatim while the prompt fits. Rewriting
 			// old results on every turn loses findings and invalidates cached prefixes.
+			// When the 5-minute prompt cache has already expired on step 0, proactively
+			// archive large tool payloads (>8 KB) once context passes 50% of budget.
 			economizeHistory(history);
 			let modelHistory = history;
 			let contextReduced = false;
-			if (limitedContext && stepsTokens(modelHistory) + overheadTokens > fittingBudget) {
+			const coldCachePressure = step === 0 && cacheExpiredAtStart && limitedContext
+				&& stepsTokens(modelHistory) + overheadTokens > fittingBudget * 0.5;
+			if (limitedContext && (stepsTokens(modelHistory) + overheadTokens > fittingBudget || coldCachePressure)) {
 				modelHistory = archive.prepareSteps(history);
 				contextReduced = true;
 			}
 			const usedEst = stepsTokens(modelHistory) + overheadTokens;
 			const cooledDown = step - lastCompactionStep >= COMPACT_COOLDOWN_STEPS;
+			const softFill = step === 0 && cacheExpiredAtStart ? 0.55 : COMPACT_SOFT_FILL;
 			const shouldCompact = limitedContext && cooledDown && (
 				usedEst >= fittingBudget * COMPACT_AT_FILL ||
-				(usedEst >= fittingBudget * COMPACT_SOFT_FILL && isCompactionBoundary(modelHistory))
+				(usedEst >= fittingBudget * softFill && isCompactionBoundary(modelHistory))
 			);
 			if (shouldCompact) {
 				const keepTokens = Math.min(24000, Math.floor((fittingBudget - overheadTokens) * COMPACT_KEEP_FRAC));
@@ -1070,92 +1285,145 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			const messages = buildMessages(system, fitted);
 			const requestTokenEstimate = stepsTokens(fitted) + overheadTokens;
 
-			let assistantText = "";
-			let thinking = "";
-			let responsesReasoning: ResponsesReasoning | undefined;
-			let chatReasoning: ChatReasoning | undefined;
-			let finishReason = "";
-			const calls: ToolCall[] = [];
 			// Map provider stream index → call id, so streamed args route to the
 			// already-announced tool card in the UI.
 			const callIdByIndex = new Map<number, string>();
 			const argsByIndex = new Map<number, string>();
 
-			const activeTools = schemasFor(mode);
-
 			// Persist received content even when the stream throws on Stop or disconnect.
 			let streamCompleted = false;
 			try {
-				for await (const ev of streamChat({
-					apiBaseUrl,
-					apiKey,
-					model,
-					apiKeyPool: opts.apiKeyPool,
-					messages,
-					tools: activeTools,
-					maxTokens,
-					promptCacheKey: opts.promptCacheKey ?? shellSessionKey,
-					sampling,
-					modelParams,
-					anthropic,
-					oauthKind,
-					signal,
-					onRetry: (attempt, max, delayMs, error) => emit({ type: "retry", attempt, max, delayMs, error }),
-				})) {
-					if (chatOnly && (ev.type === "tool-call" || ev.type === "tool-call-start" || ev.type === "tool-call-args-delta")) {
-						throw new Error("This chat-only provider returned an unsupported tool call. No action was executed.");
-					}
-					// Background indexing yields to an active run, as it does to typing.
-					noteUserActivity();
-					if (ev.type === "text-delta") {
-						assistantText += ev.text;
-						emit({ type: "text-delta", text: ev.text });
-					} else if (ev.type === "thinking-delta") {
-						thinking += ev.text;
-						emit({ type: "thinking-delta", text: ev.text });
-					} else if (ev.type === "responses-reasoning") {
-						// The provider emits complete opaque state after validating the
-						// terminal response. Keep it for tool continuations, outside the UI.
-						responsesReasoning = ev.reasoning;
-					} else if (ev.type === "chat-reasoning") {
-						chatReasoning = ev.reasoning;
-					} else if (ev.type === "tool-call-start") {
-						// Surface the tool card the moment the model commits to a call.
-						// No startedAt yet — countdown begins when execute actually starts.
-						callIdByIndex.set(ev.index, ev.id);
-						argsByIndex.set(ev.index, "");
-						const name = resolveToolName(ev.name, [...Object.keys(TOOLS), ...mcpSchemas.map(s => s.function.name)]);
-						const tMs = toolTimeoutMs(name);
-						emit({
-							type: "tool-call-started",
-							callId: ev.id,
-							name,
-							input: {},
-							timeoutMs: tMs > 0 ? tMs : undefined,
-						});
-					} else if (ev.type === "tool-call-args-delta") {
-						const id = callIdByIndex.get(ev.index);
-						const acc = (argsByIndex.get(ev.index) ?? "") + ev.delta;
-						argsByIndex.set(ev.index, acc);
-						if (id) emit({ type: "tool-call-args", callId: id, argsText: acc });
-					} else if (ev.type === "tool-call") {
-						calls.push({ ...ev.call, name: resolveToolName(ev.call.name, [...Object.keys(TOOLS), ...mcpSchemas.map(s => s.function.name)]) });
-					} else if (ev.type === "usage") {
-						lastPrompt = ev.promptTokensTotal ?? ev.promptTokens ?? lastPrompt;
-						if (lastPrompt && requestTokenEstimate > 0) {
-							promptTokenRatio = Math.max(1, lastPrompt / requestTokenEstimate);
+				for (let quotaAttempt = 1; ; quotaAttempt++) {
+					try {
+						for await (const ev of streamChat({
+							apiBaseUrl,
+							apiKey,
+							model,
+							apiKeyPool,
+							messages,
+							tools: activeTools,
+							maxTokens,
+							promptCacheKey: opts.promptCacheKey ?? shellSessionKey,
+							sampling,
+							modelParams,
+							anthropic,
+							oauthKind,
+							signal,
+							onRetry: (attempt, max, delayMs, error) => emit({ type: "retry", attempt, max, delayMs, error }),
+						})) {
+							if (chatOnly && (ev.type === "tool-call" || ev.type === "tool-call-start" || ev.type === "tool-call-args-delta")) {
+								throw new Error("This chat-only provider returned an unsupported tool call. No action was executed.");
+							}
+							// Background indexing yields to an active run, as it does to typing.
+							noteUserActivity();
+							if (ev.type === "text-delta") {
+								assistantText += ev.text;
+								emit({ type: "text-delta", text: ev.text });
+							} else if (ev.type === "thinking-delta") {
+								thinking += ev.text;
+								emit({ type: "thinking-delta", text: ev.text });
+							} else if (ev.type === "responses-reasoning") {
+								// The provider emits complete opaque state after validating the
+								// terminal response. Keep it for tool continuations, outside the UI.
+								responsesReasoning = ev.reasoning;
+							} else if (ev.type === "chat-reasoning") {
+								chatReasoning = ev.reasoning;
+							} else if (ev.type === "tool-call-start") {
+								// Surface the tool card the moment the model commits to a call.
+								// No startedAt yet — countdown begins when execute actually starts.
+								callIdByIndex.set(ev.index, ev.id);
+								argsByIndex.set(ev.index, "");
+								const name = resolveToolName(ev.name, [...Object.keys(TOOLS), ...mcpSchemas.map(s => s.function.name)]);
+								const tMs = toolTimeoutMs(name);
+								emit({
+									type: "tool-call-started",
+									callId: ev.id,
+									name,
+									input: {},
+									timeoutMs: tMs > 0 ? tMs : undefined,
+								});
+							} else if (ev.type === "tool-call-args-delta") {
+								const id = callIdByIndex.get(ev.index);
+								const acc = (argsByIndex.get(ev.index) ?? "") + ev.delta;
+								argsByIndex.set(ev.index, acc);
+								if (id) emit({ type: "tool-call-args", callId: id, argsText: acc });
+							} else if (ev.type === "tool-call") {
+								calls.push({ ...ev.call, name: resolveToolName(ev.call.name, [...Object.keys(TOOLS), ...mcpSchemas.map(s => s.function.name)]) });
+							} else if (ev.type === "usage") {
+								lastPrompt = ev.promptTokensTotal ?? ev.promptTokens ?? lastPrompt;
+								if (lastPrompt && requestTokenEstimate > 0) {
+									promptTokenRatio = Math.max(1, lastPrompt / requestTokenEstimate);
+									if (opts.contextState) {
+										opts.contextState.promptTokenRatio = promptTokenRatio;
+										opts.contextState.lastPromptAt = Date.now();
+									}
+								}
+								lastCompletion = ev.completionTokensTotal ?? ev.completionTokens ?? lastCompletion;
+								// Live-update the ring after every step. prompt/completion carry
+								// this step's delta (usage tracking accumulates them); totalTokens
+								// is the current context occupancy.
+								emit({ ...ev, type: "usage", model: ev.model ?? model, source: "parent", promptTokens: ev.promptTokens ?? 0, completionTokens: ev.completionTokens ?? 0, totalTokens: lastPrompt + lastCompletion });
+							} else if (ev.type === "done") {
+								finishReason = ev.finishReason || "";
+							}
 						}
-						lastCompletion = ev.completionTokensTotal ?? ev.completionTokens ?? lastCompletion;
-						// Live-update the ring after every step. prompt/completion carry
-						// this step's delta (usage tracking accumulates them); totalTokens
-						// is the current context occupancy.
-						emit({ ...ev, type: "usage", model: ev.model ?? model, source: "parent", promptTokens: ev.promptTokens ?? 0, completionTokens: ev.completionTokens ?? 0, totalTokens: lastPrompt + lastCompletion });
-					} else if (ev.type === "done") {
-						finishReason = ev.finishReason || "";
+
+						streamCompleted = true;
+						break;
+					} catch (err) {
+						const status = (err as { status?: number } | undefined)?.status ?? (err instanceof Error && /\b429\b/.test(err.message) ? 429 : undefined);
+						const progressed = Boolean(assistantText || thinking || calls.length || callIdByIndex.size);
+						if (signal.aborted || progressed || status !== 429 || quotaAttempt > MAX_QUOTA_RETRIES) {
+							throw err;
+						}
+						const now = Date.now();
+						const currentOauth = oauthKind;
+						let resumeAt = await resolveQuotaResumeAt({
+							error: err,
+							now,
+							fetchLimits: currentOauth ? () => getOAuthQuotaLimits(currentOauth, signal) : undefined,
+						});
+						if (quotaAttempt > 1 && resumeAt <= Date.now() + 5_000) {
+							resumeAt = Date.now() + DEFAULT_QUOTA_BACKOFF_MS;
+						}
+						const errorMsg = err instanceof Error ? err.message : String(err);
+						emit({
+							type: "retry",
+							attempt: quotaAttempt,
+							max: MAX_QUOTA_RETRIES,
+							delayMs: Math.max(0, resumeAt - Date.now()),
+							resumeAt,
+							error: errorMsg,
+						});
+						const waitStartedAt = Date.now();
+						const wake = opts.waitForQuotaReset
+							? await opts.waitForQuotaReset(resumeAt, signal)
+							: await waitUntilQuotaResumeAt(resumeAt, signal);
+						quotaWaitedMs += Math.max(0, Date.now() - waitStartedAt);
+						if (oauthKind) clearOAuthCooldowns(oauthKind);
+						const manualWake = wake === "manual" || (typeof wake === "object" && wake.action === "manual");
+						const chosenModel = typeof wake === "object" ? wake.model : undefined;
+						if (chosenModel) {
+							const switched = (await opts.resolveModelOptions?.(chosenModel)) ?? {};
+							model = switched.model ?? (chosenModel.includes("::") ? chosenModel.slice(chosenModel.indexOf("::") + 2) : chosenModel);
+							if (switched.apiBaseUrl !== undefined) apiBaseUrl = switched.apiBaseUrl;
+							if (switched.apiKey !== undefined) apiKey = switched.apiKey;
+							if ("apiKeyPool" in switched) apiKeyPool = switched.apiKeyPool;
+							if (switched.anthropic !== undefined) anthropic = switched.anthropic;
+							if ("oauthKind" in switched) {
+								oauthKind = switched.oauthKind;
+								chatOnly = !!oauthKind && !supportsOAuthTools(oauthKind);
+							}
+							if (switched.contextTokens !== undefined) contextTokens = switched.contextTokens;
+							if (switched.maxTokens !== undefined) maxTokens = switched.maxTokens;
+							if (switched.sampling !== undefined) sampling = switched.sampling;
+							if (switched.modelParams !== undefined) modelParams = switched.modelParams;
+						}
+						if (manualWake && quotaAttempt > 0) {
+							quotaAttempt--;
+						}
 					}
 				}
-
-				streamCompleted = true;
 			} finally {
 				// Partial argument deltas are UI previews, never executable tool calls.
 				// Complete calls receive a cancellation result in cleanup if unexecuted.
@@ -1167,6 +1435,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 						...(chatReasoning ? { chatReasoning } : {}),
 					});
 				}
+			}
 			}
 
 			if (!calls.length) {
@@ -1725,7 +1994,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 		}
 		emitSettled("finished");
 		emit({ type: "verification", summary: toolCtx.verification!.snapshot() });
-		emit({ type: "run-result", text: finalText, durationMs: Date.now() - started });
+		emit({ type: "run-result", text: finalText, durationMs: Math.max(0, Date.now() - started - quotaWaitedMs) });
 		if (!isSubagent && onAfterRun) {
 			onAfterRun();
 		}

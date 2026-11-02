@@ -1040,6 +1040,44 @@ export async function getAccountLimits(id: string, signal?: AbortSignal): Promis
   });
 }
 
+/** Fetch quota windows for enabled accounts of a provider kind (earliest-unblocking account wins). */
+export async function getOAuthQuotaLimits(kind: OAuthKind, signal?: AbortSignal): Promise<OAuthLimit[]> {
+  if (!supportsOAuthQuota(kind)) return [];
+  const pool = enabledOfKind(kind);
+  if (!pool.length) return [];
+  const results = await Promise.all(pool.map(async (acc) => {
+    try {
+      const usage = await getAccountLimits(acc.id, signal);
+      return usage.limits;
+    } catch {
+      return [];
+    }
+  }));
+  const nonEmpty = results.filter((limits) => limits.length > 0);
+  if (!nonEmpty.length) return [];
+  if (nonEmpty.length === 1) return nonEmpty[0];
+  const now = Date.now();
+  const blockUntil = (limits: OAuthLimit[]) => {
+    const exhausted = limits.filter((l) => l.remaining <= 0 && typeof l.resetsAt === "number" && l.resetsAt > now).map((l) => l.resetsAt!);
+    if (exhausted.length) return Math.max(...exhausted);
+    const future = limits.filter((l) => typeof l.resetsAt === "number" && l.resetsAt > now).map((l) => l.resetsAt!);
+    return future.length ? Math.min(...future) : Number.MAX_SAFE_INTEGER;
+  };
+  nonEmpty.sort((a, b) => blockUntil(a) - blockUntil(b));
+  return nonEmpty[0];
+}
+
+/** Clear rate-limit cooldowns for accounts of `kind` (or all accounts) before a timer/manual resume. */
+export function clearOAuthCooldowns(kind?: OAuthKind): void {
+  if (!kind) {
+    accountCooldowns.clear();
+    return;
+  }
+  for (const [id, acc] of accounts) {
+    if (acc.kind === kind) accountCooldowns.delete(id);
+  }
+}
+
 // Claude Code usage: % utilization per rolling window (5h + weekly).
 async function getClaudeLimits(acc: OAuthAccount, signal?: AbortSignal): Promise<OAuthLimit[]> {
   const r = await oauthFetch(acc.id, (fresh) => ({ url: ANTHROPIC.usageUrl, init: { method: "GET", headers: claudeOAuthHeaders(fresh.accessToken) } }), signal);
@@ -1268,6 +1306,14 @@ async function oauthStreamError(label: string, response: Response): Promise<Chat
   const retry = response.headers.get("retry-after");
   if (retry) {
     const delay = /^\d+(?:\.\d+)?$/.test(retry.trim()) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+    if (Number.isFinite(delay) && delay > 0) Object.assign(error, { retryAfterMs: delay });
+  } else {
+    const resetHeader = response.headers.get("anthropic-ratelimit-unified-reset")
+      ?? response.headers.get("anthropic-ratelimit-requests-reset")
+      ?? response.headers.get("anthropic-ratelimit-tokens-reset")
+      ?? response.headers.get("x-ratelimit-reset");
+    const resetMs = resetHeader ? parseResetMs(resetHeader.trim()) : undefined;
+    const delay = resetMs !== undefined ? resetMs - Date.now() : NaN;
     if (Number.isFinite(delay) && delay > 0) Object.assign(error, { retryAfterMs: delay });
   }
   return error;

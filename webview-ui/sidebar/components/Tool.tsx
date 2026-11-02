@@ -9,6 +9,7 @@
 
 import { parseTodos } from "../../../src/shared/todoPresentation";
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { AnimatedDisclosure } from "../../shared/AnimatedDisclosure";
 import { TextSwap } from "../../shared/TextTransitions";
 import { DateField, isValidDate } from "../../shared/DateField";
@@ -16,7 +17,7 @@ import { Icon, IconName } from "../../shared/icons";
 import { basename } from "../../shared/markdown";
 import { MarkdownView } from "../../shared/MarkdownView";
 import { vscode } from "../../shared/vscode";
-import type { ToolBlock, OutMessage, AssistantBlock, FileIconInfo } from "../types";
+import type { ToolBlock, OutMessage, AssistantBlock, FileIconInfo, ModelDef } from "../types";
 
 function post(msg: OutMessage) {
   vscode.postMessage(msg);
@@ -168,6 +169,182 @@ function toolMeta(name: string, i: any): { icon: IconName; label: string; badge:
 
 export const TaskActivityContext = React.createContext(false);
 
+export interface ModelPickerContextValue {
+  models: string[];
+  modelList: ModelDef[];
+  selectedModel: string;
+}
+
+export const ModelPickerContext = React.createContext<ModelPickerContextValue>({
+  models: [],
+  modelList: [],
+  selectedModel: "",
+});
+
+/** Compact inline model+provider selector matching the composer's ModelPicker. */
+export function InlineModelPicker({
+  selected,
+  onSelect,
+}: {
+  selected: string;
+  onSelect: (modelId: string) => void;
+}) {
+  const { models, modelList, selectedModel: defaultModel } = React.useContext(ModelPickerContext);
+  const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState("");
+  const triggerRef = React.useRef<HTMLSpanElement>(null);
+  const pickerRef = React.useRef<HTMLDivElement>(null);
+
+  const list: ModelDef[] = React.useMemo(() => {
+    if (modelList.length) return modelList;
+    return models.map((id) => ({ id, name: id, kind: "openai" as const, options: [] }));
+  }, [modelList, models]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onDocDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (t && !triggerRef.current?.contains(t) && !pickerRef.current?.contains(t)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocDown);
+    return () => document.removeEventListener("mousedown", onDocDown);
+  }, [open]);
+
+  if (list.length === 0 && !selected && !defaultModel) return null;
+
+  const effective = selected || defaultModel;
+  const matched =
+    list.find((m) => m.id === effective) ||
+    list.find((m) => (m.modelId || m.id.replace(/^.*::/, "")) === effective.replace(/^.*::/, ""));
+  const currentId = matched?.id || effective;
+  const selLabel = matched ? `${matched.providerName ? `${matched.providerName} · ` : ""}${matched.name}` : shortModelName(effective) || "Select model";
+
+  const filtered = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(
+      (m) =>
+        m.name.toLowerCase().includes(q) ||
+        m.id.toLowerCase().includes(q) ||
+        (m.providerName || "").toLowerCase().includes(q),
+    );
+  }, [list, query]);
+
+  const byProvider = React.useMemo(() => {
+    const groups = new Map<string, ModelDef[]>();
+    for (const m of filtered) {
+      const key =
+        m.kind === "llamacpp"
+          ? "Local · llama.cpp"
+          : m.kind === "ollama"
+            ? "Local · Ollama"
+            : m.providerName || "Other";
+      (groups.get(key) ?? groups.set(key, []).get(key)!).push(m);
+    }
+    return [...groups.entries()];
+  }, [filtered]);
+
+  const rect = open ? triggerRef.current?.getBoundingClientRect() : undefined;
+  const pickerStyle: React.CSSProperties = rect
+    ? {
+        position: "fixed",
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)),
+        ...(rect.top > 240
+          ? { bottom: window.innerHeight - rect.top + 6, top: "auto" }
+          : { top: rect.bottom + 6, bottom: "auto" }),
+        zIndex: 9999,
+      }
+    : { position: "fixed", zIndex: 9999 };
+
+  return (
+    <span
+      ref={triggerRef}
+      className="model-select resume-model-select"
+      role="button"
+      tabIndex={0}
+      aria-label="Choose model to resume with"
+      aria-expanded={open}
+      title={`Resume model: ${selLabel}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        setOpen((v) => !v);
+      }}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          setOpen((v) => !v);
+        } else if (e.key === "Escape") {
+          setOpen(false);
+        }
+      }}
+    >
+      <span className="label">{selLabel}</span>
+      <Icon name="chevD" className="cd" />
+      {open &&
+        createPortal(
+          <div
+            ref={pickerRef}
+            className="model-picker"
+            data-state="open"
+            style={pickerStyle}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="model-picker-view">
+              <div className="mp-search">
+                <Icon name="search" className="mp-search-icon" />
+                <input
+                  value={query}
+                  placeholder="Search models & providers"
+                  onChange={(e) => setQuery(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              </div>
+              <div className="mp-body">
+                {filtered.length === 0 && <div className="model-item dim">No matches</div>}
+                {byProvider.map(([provName, items]) => (
+                  <React.Fragment key={provName}>
+                    <div className="mp-group-label">{provName}</div>
+                    {items.map((m) => (
+                      <div
+                        key={m.id}
+                        className={"model-item" + (m.id === currentId ? " active" : "")}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Select ${m.name}`}
+                        aria-pressed={m.id === currentId}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelect(m.id);
+                          setOpen(false);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onSelect(m.id);
+                            setOpen(false);
+                          }
+                        }}
+                      >
+                        <span className="model-item-name">{m.name}</span>
+                        {m.id === currentId && <Icon name="check" className="model-item-check" />}
+                      </div>
+                    ))}
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </span>
+  );
+}
+
 function TodoList({ block }: { block: ToolBlock }) {
   const running = React.useContext(TaskActivityContext);
   const items = parseTodos(block.result || "");
@@ -242,11 +419,13 @@ function SubagentCard({ block, onOpen, awaitingApproval }: { block: ToolBlock; o
     ? "approval"
     : running
       ? (i.run_in_background === true ? "background" : "running")
-      : block.subStatus === "error" || block.status === "error"
-        ? "error"
-        : block.subStatus === "cancelled"
-          ? "cancelled"
+      : block.subStatus === "cancelled"
+        ? "cancelled"
+        : block.subStatus === "error" || block.status === "error"
+          ? "error"
           : "done";
+  const canResume = !running && (statusKind === "cancelled" || statusKind === "error");
+  const [resumeModel, setResumeModel] = React.useState<string>("");
 
   return (
     <div className={"subagent-card" + (awaitingApproval ? " needs-approval" : "")} onClick={() => onOpen?.(block.callId)} role="button" tabIndex={0} title="Open subagent"
@@ -258,8 +437,30 @@ function SubagentCard({ block, onOpen, awaitingApproval }: { block: ToolBlock; o
       <div className="subagent-card-main">
         <span className="ticon"><Icon name="task" /></span>
         <span className="label">{i.description || subName || "Subagent"}</span>
-        <span className="subagent-card-actions">
-          {running ? <RunningStop callId={block.callId} /> : <StatusIcon status={block.subStatus === "error" ? "error" : "completed"} />}
+        <span className="subagent-card-actions" onClick={(e) => canResume && e.stopPropagation()}>
+          {canResume && (
+            <>
+              <InlineModelPicker selected={resumeModel || String(i.model || "")} onSelect={setResumeModel} />
+              <button
+                type="button"
+                className="sub-resume-btn"
+                title="Resume interrupted subagent from last checkpoint without sending a user message"
+                aria-label="Resume subagent"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  post({
+                    type: "resumeCheckpoint",
+                    callId: block.callId,
+                    ...(resumeModel ? { model: resumeModel } : {}),
+                  });
+                }}
+              >
+                <Icon name="play" size={10} />
+                <span>Resume</span>
+              </button>
+            </>
+          )}
+          {running ? <RunningStop callId={block.callId} /> : <StatusIcon status={statusKind === "error" ? "error" : "completed"} />}
           <Icon name="chevR" size={14} className="sub-open-chev" />
         </span>
       </div>

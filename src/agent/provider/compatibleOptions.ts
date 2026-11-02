@@ -21,7 +21,7 @@ export function compatibleProviderFor(baseUrl: string, model: string): Compatibl
   const path = url.pathname.replace(/\/+$/, "");
   const host = url.hostname;
   if (host === "api.x.ai" && path === "/v1" && /^grok-4\.[567]$/.test(model)) return "xai";
-  if (host === "api.deepseek.com" && ["", "/v1"].includes(path) && /^(?:deepseek-flash|deepseek-v4-pro)$/.test(model)) return "deepseek";
+  if (host === "api.deepseek.com" && ["", "/v1"].includes(path) && /^(?:deepseek-flash|deepseek-v4-pro|deepseek-reasoner|deepseek-chat)$/.test(model)) return "deepseek";
   if (host === "api.moonshot.ai" && path === "/v1" && /^kimi-(?:k3|k2\.7-code(?:-highspeed)?|k2\.6)$/.test(model)) return "moonshot";
   if (host === "api.z.ai" && /^\/api\/(?:coding\/)?paas\/v4$/.test(path) && /^glm-5\.3(?:-flashx?)?$/.test(model)) return "z-ai";
   if (host === "api.minimax.io" && path === "/v1" && /^MiniMax-M(?:3|2\.7(?:-highspeed)?)$/.test(model)) return "minimax";

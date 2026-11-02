@@ -12,7 +12,7 @@ import type { OAuthAccount, OAuthKind } from "./oauth/types";
 
 vi.mock("vscode", () => ({ EventEmitter: class { event = () => ({ dispose() {} }); fire() {} } }));
 vi.mock("../stores/featureStore", () => ({ MODEL_CATALOG: [] }));
-import { consumeCodexResetCredit, disconnect, getAccountLimits, initOAuth, listAccounts } from "./oauth";
+import { clearOAuthCooldowns, consumeCodexResetCredit, disconnect, getAccountLimits, getOAuthQuotaLimits, initOAuth, listAccounts, streamOAuthChat } from "./oauth";
 
 const saved = new Map<string, string>();
 
@@ -196,5 +196,43 @@ describe("Codex reset credit is sent once", () => {
     const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
     await expect(consumeCodexResetCredit(account.id, controller.signal)).rejects.toMatchObject({ name: "AbortError", message: "Codex reset credit cancelled" });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fetches Claude Code quota limits and clears account cooldowns on manual or timer resume", async () => {
+    await seed("claude-code");
+    const resetSec = Math.floor((Date.now() + 4_500_000) / 1000);
+    let limited = true;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("/api/oauth/usage")) {
+        return Response.json({
+          five_hour: { utilization: 100, resets_at: resetSec },
+          seven_day: { utilization: 40, resets_at: resetSec + 86_400 },
+        });
+      }
+      if (limited) {
+        return new Response(JSON.stringify({ error: { message: "Rate limit reached" } }), {
+          status: 429,
+          headers: { "anthropic-ratelimit-unified-reset": String(resetSec) },
+        });
+      }
+      return new Response(
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Resumed"}}\n\ndata: {"type":"message_stop"}\n\n',
+        { status: 200 },
+      );
+    }));
+    const signal = new AbortController().signal;
+    const consume = async () => {
+      const out = [];
+      for await (const ev of streamOAuthChat("claude-code", { model: "claude-sonnet-5-5", messages: [{ role: "user", content: "hi" }], signal })) {
+        out.push(ev);
+      }
+      return out;
+    };
+    await expect(consume()).rejects.toMatchObject({ status: 429 });
+    const limits = await getOAuthQuotaLimits("claude-code", signal);
+    expect(limits).toContainEqual(expect.objectContaining({ label: "Session (5h)", remaining: 0, resetsAt: resetSec * 1000 }));
+    limited = false;
+    clearOAuthCooldowns("claude-code");
+    await expect(consume()).resolves.toContainEqual({ type: "text-delta", text: "Resumed" });
   });
 });

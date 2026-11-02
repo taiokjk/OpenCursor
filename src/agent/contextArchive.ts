@@ -12,6 +12,8 @@ import type { Step, ToolCall } from "./types";
 
 const ARCHIVE_THRESHOLD = 8000;
 const PREVIEW_CHARS = 4000;
+const OLDER_TURN_ARCHIVE_THRESHOLD = 3500;
+const OLDER_TURN_PREVIEW_CHARS = 1800;
 const READ_BODY_CHARS = 5400;
 const READ_LINES = 120;
 
@@ -129,25 +131,70 @@ export class ContextArchive {
    */
   prepareSteps(steps: Step[]): Step[] {
     const completed = new Map<string, Set<string>>();
+    const callArgsById = new Map<string, string>();
+    let lastUserIdx = -1;
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const s = steps[i];
+      if (s.kind === "user" && !s.synthetic && !s.steering) {
+        lastUserIdx = i;
+        break;
+      }
+    }
     for (const step of steps) {
+      if (step.kind === "assistant") {
+        for (const call of step.calls) callArgsById.set(call.id, call.arguments);
+        continue;
+      }
       if (step.kind !== "tool-result" || step.status !== "completed") continue;
       const names = completed.get(step.callId) ?? new Set<string>();
       names.add(step.name);
       completed.set(step.callId, names);
     }
-    return steps.map((step): Step => {
-      if (step.kind === "tool-result" && step.name !== "ReadContext" && step.output.length > ARCHIVE_THRESHOLD) {
+    const latestIdenticalRead = new Map<string, { idx: number; callId: string }>();
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      if (step.kind === "tool-result" && step.status === "completed" && step.name === "Read" && step.output.length > 500) {
+        const args = callArgsById.get(step.callId);
+        if (args !== undefined) {
+          latestIdenticalRead.set(`${step.name}\0${args}\0${step.output}`, { idx: i, callId: step.callId });
+        }
+      }
+    }
+    return steps.map((step, idx): Step => {
+      if (step.kind === "tool-result" && step.status === "completed" && step.name === "Read" && step.output.length > 500) {
+        const args = callArgsById.get(step.callId);
+        const latest = args !== undefined ? latestIdenticalRead.get(`${step.name}\0${args}\0${step.output}`) : undefined;
+        if (latest && latest.idx > idx) {
+          const id = this.store(step.output, `${step.name} result (${step.callId})`);
+          return {
+            ...step,
+            output: `[Duplicate ${step.name} output identical to later call ${latest.callId}; full ${step.output.length} characters archived. Use ReadContext {"id":"${id}"} to inspect.]`,
+          };
+        }
+      }
+      const olderTurn = lastUserIdx > 0 && idx < lastUserIdx;
+      const threshold = olderTurn ? OLDER_TURN_ARCHIVE_THRESHOLD : ARCHIVE_THRESHOLD;
+      if (step.kind === "tool-result" && step.name !== "ReadContext" && step.output.length > threshold) {
+        // Outputs > ARCHIVE_THRESHOLD keep PREVIEW_CHARS across all turns so an
+        // already-archived turn's prefix never changes on follow-up turns.
+        const previewBudget = step.output.length > ARCHIVE_THRESHOLD ? PREVIEW_CHARS : OLDER_TURN_PREVIEW_CHARS;
         const id = this.store(step.output, `${step.name} result (${step.callId})`);
         const marker = `\n\n[Large output abbreviated; full ${step.output.length} characters archived. Use ReadContext {"id":"${id}"} with line ranges or pattern to retrieve omitted content.]\n\n`;
-        const available = PREVIEW_CHARS - marker.length;
+        const available = previewBudget - marker.length;
         const head = Math.ceil(available * 0.6);
         const tail = available - head;
         return { ...step, output: `${step.output.slice(0, head)}${marker}${step.output.slice(-tail)}` };
       }
       if (step.kind !== "assistant") return step;
+      let chatReasoning = step.chatReasoning;
+      if (olderTurn && chatReasoning && chatReasoning.content.length > ARCHIVE_THRESHOLD) {
+        this.store(chatReasoning.content, `assistant reasoning (${idx})`);
+        chatReasoning = undefined;
+      }
       return {
         ...step,
         thinking: undefined,
+        chatReasoning,
         calls: step.calls.map((call) => completed.get(call.id)?.has(call.name) ? this.prepareCall(call) : call),
       };
     });

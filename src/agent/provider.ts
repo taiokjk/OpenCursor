@@ -9,6 +9,7 @@
 
 import { ChatReasoning, ProviderEvent, ToolCall, ToolSchema, WireMessage, WireContentPart } from "./types";
 import { streamOAuthChat, type OAuthKind } from "./oauth";
+import { parseQuotaResetTime } from "./quotaRetry";
 import type { ModelInfo, ModelParams, SamplingParams, StreamChatOpts } from "./provider/types";
 import { MODEL_CATALOG } from "../stores/featureStore";
 import { defaultAnthropicMaxTokens } from "./providerLimits";
@@ -157,6 +158,9 @@ export function isRetryableError(e: unknown): boolean {
   if ((e as { retryable?: boolean } | undefined)?.retryable === false) return false;
   if (e instanceof DOMException && e.name === "AbortError") return false;
   if (e instanceof ChatHTTPError) {
+    if (e.status === 429 && ((e.retryAfterMs && e.retryAfterMs > 0) || parseQuotaResetTime(e.message))) {
+      return false;
+    }
     return e.status === 408 || e.status === 425 || e.status === 429 || e.status === 499 || e.status >= 500;
   }
   // fetch network failures (TypeError "Failed to fetch", ECONNRESET, etc.) are retryable.
@@ -258,12 +262,25 @@ function matchingChatReasoning(message: Extract<WireMessage, { role: "assistant"
 /** DeepSeek thinking+tools rejects assistant turns without original reasoning,
  * including ordinary answers. Keep older observations as labeled history, not
  * forged assistant reasoning or outstanding calls that could run again.
+ * For deepseek-reasoner / deepseek-chat, DeepSeek's API spec also mandates
+ * stripping reasoning_content from assistant turns prior to the latest user turn.
  * https://api-docs.deepseek.com/guides/thinking_mode/#tool-calls */
 function prepareReasoningHistory(messages: WireMessage[], identity: Omit<ChatReasoning, "content">): WireMessage[] {
   const calls = new Map<string, { name: string; historical: boolean }>();
-  return messages.map((message): WireMessage => {
+  const stripPriorTurns = identity.model === "deepseek-reasoner" || identity.model === "deepseek-chat";
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  return messages.map((message, idx): WireMessage => {
     if (message.role === "assistant") {
-      const historical = !matchingChatReasoning(message, identity);
+      if (stripPriorTurns && idx < lastUserIdx && !message.tool_calls?.length) {
+        return { role: "assistant", content: message.content };
+      }
+      const historical = !matchingChatReasoning(message, identity) || (stripPriorTurns && idx < lastUserIdx);
       for (const call of message.tool_calls ?? []) calls.set(call.id, { name: call.function.name, historical });
       if (!historical) return message;
       const observations = (message.tool_calls ?? []).map(call =>

@@ -16,7 +16,7 @@ import { ImagePreview } from "../shared/ImagePreview";
 import { MarkdownView } from "../shared/MarkdownView";
 import { vscode } from "../shared/vscode";
 import { Composer, KIND_SVG, applyFileIconTo, type ComposerDraft } from "./components/Composer";
-import { ToolCard, TaskActivityContext, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
+import { ToolCard, TaskActivityContext, ModelPickerContext, InlineModelPicker, isReadonlySubagent, TimeoutBadge, ToolTimeoutWatch, isToolCountdownActive, useLiveDisclosure } from "./components/Tool";
 import { History } from "./components/History";
 import { MessageActions } from "./components/MessageActions";
 import { WorkingSection } from "./components/WorkingSection";
@@ -543,8 +543,76 @@ function ThinkingCard({ block, action }: { block: ThinkingBlock; action?: React.
   );
 }
 
-function ErrorCard({ block }: { block: ErrorBlock }) {
+function formatQuotaCountdown(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours}h`);
+  if (hours > 0 || minutes > 0) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+
+function ErrorCard({ block, callId, defaultModel }: { block: ErrorBlock; callId?: string; defaultModel?: string }) {
+  const resumeAt = block.retrying?.resumeAt;
+  const { selectedModel } = React.useContext(ModelPickerContext);
+  const effectiveModel = defaultModel || selectedModel;
+  const [now, setNow] = React.useState(() => Date.now());
+  const [resuming, setResuming] = React.useState(false);
+  const [chosenModel, setChosenModel] = React.useState<string>("");
+
+  React.useEffect(() => {
+    setResuming(false);
+    setNow(Date.now());
+  }, [block.retrying?.attempt, resumeAt]);
+
+  React.useEffect(() => {
+    if (!resumeAt || resuming) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= resumeAt) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resumeAt, resuming]);
+
   if (block.retrying) {
+    if (resumeAt !== undefined) {
+      const remainingMs = Math.max(0, resumeAt - now);
+      const resetClock = new Date(resumeAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+      return (
+        <div className="error-card retrying quota-wait">
+          <div className="quota-wait-main">
+            <Icon name="clock" size={12} className="error-spark" />
+            <span>
+              {resuming || remainingMs <= 0
+                ? `Resuming session… (${block.retrying.attempt}/${block.retrying.max})`
+                : `Quota limit reached — auto-resuming in ${formatQuotaCountdown(remainingMs)} (at ${resetClock}) · (${block.retrying.attempt}/${block.retrying.max})`}
+            </span>
+            <InlineModelPicker selected={chosenModel || effectiveModel || ""} onSelect={setChosenModel} />
+            <button
+              type="button"
+              className="ap-btn allow quota-resume-btn"
+              disabled={resuming}
+              onClick={() => {
+                setResuming(true);
+                post({
+                  type: "resumeQuotaWait",
+                  ...(callId ? { callId } : {}),
+                  ...(chosenModel ? { model: chosenModel } : {}),
+                });
+              }}
+            >
+              Resume now
+            </button>
+          </div>
+          <span className="error-detail">{block.message}</span>
+        </div>
+      );
+    }
     return (
       <div className="error-card retrying">
         <Icon name="brain" size={12} className="error-spark" />
@@ -681,10 +749,14 @@ const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex,
   approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
 }) {
   const { activity, conclusion } = splitWork(turn, running);
-  const forceOpen = turn.blocks.some(block => block.kind === "tool" && (
-    !!approvals[block.callId] || !!taskApprovals[block.callId]?.length ||
-    block.status === "running" && (block.name === "AskQuestion" || block.name === "ask_question")
-  ));
+  const waiting = running && turn.blocks.some(block => block.kind === "error" && !!block.retrying?.resumeAt);
+  const forceOpen = turn.blocks.some(block =>
+    block.kind === "error" && !!block.retrying?.resumeAt ||
+    block.kind === "tool" && (
+      !!approvals[block.callId] || !!taskApprovals[block.callId]?.length ||
+      block.status === "running" && (block.name === "AskQuestion" || block.name === "ask_question")
+    ),
+  );
   const render = (blocks: AssistantBlock[], live: boolean) => {
     const items = groupBlocks(blocks);
     return items.map((block, index) => {
@@ -708,7 +780,8 @@ const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex,
       </div>;
     });
   };
-  return <WorkingSection running={running} startedAt={turn.startedAt} endedAt={turn.endedAt} durationMs={turn.durationMs}
+  return <WorkingSection running={running} waiting={waiting} startedAt={turn.startedAt} endedAt={turn.endedAt}
+    waitingStartedAt={turn.waitingStartedAt} waitedMs={turn.waitedMs} durationMs={turn.durationMs}
     hasActivity={activity.length > 0} forceOpen={forceOpen} activity={render(activity, running)}
     conclusion={conclusion.length ? render(conclusion, false) : undefined}
     status={phase ? <div className="phase-row"><ThinkingStatus text={phase} /></div> : undefined} />;
@@ -729,6 +802,7 @@ function SubagentChat({
   const subType = String(block.input?.subagent_type || "").trim();
   const subName = subType && subType !== "generalPurpose" ? subType : "";
   const [promptOpen, setPromptOpen] = React.useState(false);
+  const [resumeModel, setResumeModel] = React.useState<string>("");
   const pinnedApprovals = React.useMemo(() => approvalsForSubagent(block, approvals), [block, approvals]);
 
   return (
@@ -767,7 +841,7 @@ function SubagentChat({
               ) : b.kind === "thinking" ? (
                 <ThinkingCard key={bi} block={b} />
               ) : b.kind === "error" ? (
-                <div className="block-group" key={bi}><ErrorCard block={b} /></div>
+                <div className="block-group" key={bi}><ErrorCard block={b} callId={block.callId} defaultModel={String(block.input?.model || "")} /></div>
               ) : b.kind === "compaction" ? (
                 <div className="block-group" key={bi}><CompactionCard block={b} /></div>
               ) : b.kind === "max-steps" ? (
@@ -791,10 +865,33 @@ function SubagentChat({
               ))}
             </div>
           )}
-          {!running && block.result && (
+          {!running && (block.result || (!parentRunning && (block.subStatus === "cancelled" || block.subStatus === "error" || block.status === "error"))) && (
             <div className="sub-summary">
-              <div className="sub-summary-label">Summary</div>
-              <Markdown text={block.result} />
+              <div className="sub-summary-head">
+                <div className="sub-summary-label">Summary</div>
+                {!parentRunning && (block.subStatus === "cancelled" || block.subStatus === "error" || block.status === "error") && (
+                  <div className="sub-summary-resume-actions">
+                    <InlineModelPicker selected={resumeModel || String(block.input?.model || "")} onSelect={setResumeModel} />
+                    <button
+                      type="button"
+                      className="sub-resume-btn"
+                      title="Resume interrupted subagent from last checkpoint without sending a user message"
+                      aria-label="Resume subagent"
+                      onClick={() =>
+                        post({
+                          type: "resumeCheckpoint",
+                          callId: block.callId,
+                          ...(resumeModel ? { model: resumeModel } : {}),
+                        })
+                      }
+                    >
+                      <Icon name="play" size={10} />
+                      <span>Resume from checkpoint</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+              {block.result ? <Markdown text={block.result} /> : null}
             </div>
           )}
         </div>
@@ -980,11 +1077,21 @@ export function App() {
   const [hasProviders, setHasProviders] = React.useState(true);
   const [teams, setTeams] = React.useState<TeamInfo[]>([]);
   const [activeTeamIds, setActiveTeamIds] = React.useState<string[]>([]);
-  const [uiPrefs, setUiPrefs] = React.useState<{ chatTextSize: string; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean; perTabDrafts: boolean; motion?: MotionPreference }>({ chatTextSize: "default", submitWithCtrlEnter: false, maxTabCount: 0, completionSound: false, perTabDrafts: false, motion: "full" });
+  const [uiPrefs, setUiPrefs] = React.useState<{ chatTextSize: string; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean; perTabDrafts: boolean; motion?: MotionPreference }>({ chatTextSize: "default", submitWithCtrlEnter: false, maxTabCount: 0, completionSound: false, perTabDrafts: true, motion: "full" });
   React.useEffect(() => { setMotionPreference(uiPrefs.motion); }, [uiPrefs.motion]);
   const uiPrefsRef = React.useRef(uiPrefs);
   React.useEffect(() => { uiPrefsRef.current = uiPrefs; }, [uiPrefs]);
-  const draftKey = uiPrefs.perTabDrafts ? (activeId ?? "") : SHARED_DRAFT;
+  const draftKey = uiPrefs.perTabDrafts !== false ? (activeId ?? "") : SHARED_DRAFT;
+  const tabModelsRef = React.useRef<Map<string, string>>(new Map());
+  const tabModesRef = React.useRef<Map<string, Mode>>(new Map());
+  const initialModelRef = React.useRef("");
+  const initialModeRef = React.useRef<Mode>("agent");
+  const selectedModelRef = React.useRef("");
+  React.useEffect(() => { selectedModelRef.current = selectedModel; }, [selectedModel]);
+  const modeRef = React.useRef<Mode>("agent");
+  React.useEffect(() => { modeRef.current = mode; }, [mode]);
+  const openTabsRef = React.useRef<string[]>([]);
+  React.useEffect(() => { openTabsRef.current = openTabs; }, [openTabs]);
   const [pendingChanges, setPendingChanges] = React.useState<PendingChangeInfo[]>([]);
   // Pending in-chat approval requests, keyed by conversation id.
   const [approvals, setApprovals] = React.useState<Record<string, ApprovalRequestInfo[]>>({});
@@ -1344,11 +1451,29 @@ export function App() {
     const handler = (event: MessageEvent<InMessage>) => {
       const msg = event.data;
       switch (msg.type) {
-        case "initialState":
+        case "initialState": {
           setWorkspaceRoot(msg.workspaceRoot);
           setApprovalPolicy(msg.approvalPolicy);
-          setMode(msg.mode);
-          setSelectedModel(msg.selectedModel || "");
+          const initMode = msg.mode || "agent";
+          const initModel = msg.selectedModel || "";
+          initialModeRef.current = initMode;
+          initialModelRef.current = initModel;
+          const activeKey = msg.activeId ?? "";
+          const initialTabs = msg.workspaceState
+            ? [...new Set([...msg.workspaceState.openTabs, ...msg.activeId ? [msg.activeId] : []])]
+            : msg.activeId ? [msg.activeId] : [];
+          tabModelsRef.current = new Map(Object.entries(msg.workspaceState?.models ?? {}));
+          tabModesRef.current = new Map(Object.entries(msg.workspaceState?.modes ?? {}));
+          for (const t of [...initialTabs, activeKey]) {
+            if (!tabModelsRef.current.has(t) && initModel) tabModelsRef.current.set(t, initModel);
+            if (!tabModesRef.current.has(t)) tabModesRef.current.set(t, initMode);
+          }
+          const resolvedModel = tabModelsRef.current.get(activeKey) ?? initModel;
+          const resolvedMode = tabModesRef.current.get(activeKey) ?? initMode;
+          selectedModelRef.current = resolvedModel;
+          modeRef.current = resolvedMode;
+          setMode(resolvedMode);
+          setSelectedModel(resolvedModel);
           seedSession(msg.activeId, msg.turns || [], msg.usedTokens, msg.runningConvIds?.includes(msg.activeId ?? "") ?? false);
           markRunning(msg.runningConvIds);
           setActiveId(msg.activeId);
@@ -1357,15 +1482,22 @@ export function App() {
           setHasProviders(!!msg.hasProviders);
           if (msg.teams) setTeams(msg.teams);
           if (msg.activeTeamIds) setActiveTeamIds(msg.activeTeamIds);
-          if (msg.uiPrefs) setUiPrefs(msg.uiPrefs);
+          const nextPerTabDrafts = msg.uiPrefs ? msg.uiPrefs.perTabDrafts !== false : true;
+          if (msg.uiPrefs) setUiPrefs({ ...msg.uiPrefs, perTabDrafts: nextPerTabDrafts });
           if (msg.workspaceState) {
-            draftsRef.current = new Map(Object.entries(msg.workspaceState.drafts));
-            setOpenTabs([...new Set([...msg.workspaceState.openTabs, ...msg.activeId ? [msg.activeId] : []])]);
+            const loadedDrafts = new Map(Object.entries(msg.workspaceState.drafts));
+            if (nextPerTabDrafts && loadedDrafts.has(SHARED_DRAFT) && !loadedDrafts.has(activeKey)) {
+              loadedDrafts.set(activeKey, loadedDrafts.get(SHARED_DRAFT)!);
+              loadedDrafts.delete(SHARED_DRAFT);
+            }
+            draftsRef.current = loadedDrafts;
+            setOpenTabs(initialTabs);
             setDraftTick();
           } else if (msg.activeId) setOpenTabs((t) => t.includes(msg.activeId!) ? t : [...t, msg.activeId!]);
           workspaceReady.current = true;
           force();
           break;
+        }
         case "workflowState": {
           const next = new Map<string, (QueuedMessage & { steering?: boolean; optimisticSteering?: boolean })[]>();
           const ids = new Set([...Object.keys(msg.queues), ...Object.keys(msg.steeringQueues ?? {}), ...pendingSteeringRef.current.keys()]);
@@ -1403,6 +1535,10 @@ export function App() {
           if (msg.created) {
             const pending = sessionsRef.current.get("");
             if (pending) { sessionsRef.current.set(msg.convId, pending); sessionsRef.current.delete(""); }
+            const m = tabModelsRef.current.get("");
+            if (m !== undefined) { tabModelsRef.current.set(msg.convId, m); tabModelsRef.current.delete(""); }
+            const md = tabModesRef.current.get("");
+            if (md !== undefined) { tabModesRef.current.set(msg.convId, md); tabModesRef.current.delete(""); }
             activeIdRef.current = msg.convId;
             setActiveId(msg.convId);
             setOpenTabs((tabs) => [...new Set([...tabs.filter((id) => id !== ""), msg.convId])]);
@@ -1413,22 +1549,27 @@ export function App() {
           force();
           break;
         case "queueDraft": {
-          const key = uiPrefsRef.current.perTabDrafts ? msg.convId : SHARED_DRAFT;
+          const key = uiPrefsRef.current.perTabDrafts !== false ? msg.convId : SHARED_DRAFT;
           draftsRef.current.set(key, msg.draft);
           if (activeIdRef.current === msg.convId) setDraft(msg.draft);
           setDraftTick();
           break;
         }
-        case "modelSelected":
-          setSelectedModel(msg.model || ""); // auto hidden for now
+        case "modelSelected": {
+          const fallbackModel = msg.model || "";
+          const activeKey = activeIdRef.current ?? "";
+          tabModelsRef.current.set(activeKey, fallbackModel);
+          selectedModelRef.current = fallbackModel;
+          setSelectedModel(fallbackModel); // auto hidden for now
           break;
+        }
         case "configState":
           if (msg.approvalPolicy) setApprovalPolicy(msg.approvalPolicy);
           setPersonas(msg.personas || []);
           setHasProviders(!!msg.hasProviders);
           if (msg.teams) setTeams(msg.teams);
           if (msg.activeTeamIds) setActiveTeamIds(msg.activeTeamIds);
-          if (msg.uiPrefs) setUiPrefs(msg.uiPrefs);
+          if (msg.uiPrefs) setUiPrefs({ ...msg.uiPrefs, perTabDrafts: msg.uiPrefs.perTabDrafts !== false });
           // Only follow the global default persona for brand-new (empty) chats.
           if (sessionFor(activeIdRef.current).turns.length === 0) setPersonaId(msg.activePersonaId || "default");
           break;
@@ -1455,10 +1596,21 @@ export function App() {
           if (msg.convId === activeIdRef.current) force();
           break;
         }
-        case "loadConversation":
+        case "loadConversation": {
           setWorkspaceRoot(msg.workspaceRoot);
           if (!msg.activeId) sessionsRef.current.set("", { turns: [], running: false, status: { text: "" } });
           else seedSession(msg.activeId, msg.turns || [], msg.usedTokens, msg.running === true);
+          const nextKey = msg.activeId ?? "";
+          const turnModel = [...(msg.turns ?? [])].reverse().find((t): t is UserTurn => t.role === "user" && !!t.model)?.model;
+          const turnMode = [...(msg.turns ?? [])].reverse().find((t): t is UserTurn => t.role === "user" && !!t.mode)?.mode as Mode | undefined;
+          const nextModel = tabModelsRef.current.get(nextKey) ?? msg.selectedModel ?? turnModel ?? initialModelRef.current ?? selectedModelRef.current;
+          const nextMode: Mode = tabModesRef.current.get(nextKey) ?? msg.mode ?? turnMode ?? initialModeRef.current ?? modeRef.current;
+          if (nextModel) tabModelsRef.current.set(nextKey, nextModel);
+          if (nextMode) tabModesRef.current.set(nextKey, nextMode);
+          selectedModelRef.current = nextModel;
+          modeRef.current = nextMode;
+          setSelectedModel(nextModel);
+          setMode(nextMode);
           setActiveId(msg.activeId);
           setHistoryOpen(false);
           if (msg.personaId) setPersonaId(msg.personaId);
@@ -1473,6 +1625,7 @@ export function App() {
           });
           force();
           break;
+        }
         case "runStarted": {
           // First message in a brand-new chat: migrate the pending (id-less) session.
           if (msg.created) {
@@ -1482,6 +1635,10 @@ export function App() {
             if (queued) { queueRef.current.set(msg.convId, queued); queueRef.current.delete(""); }
             const d = draftsRef.current.get("");
             if (d) { draftsRef.current.set(msg.convId, d); draftsRef.current.delete(""); }
+            const m = tabModelsRef.current.get("");
+            if (m !== undefined) { tabModelsRef.current.set(msg.convId, m); tabModelsRef.current.delete(""); }
+            const md = tabModesRef.current.get("");
+            if (md !== undefined) { tabModesRef.current.set(msg.convId, md); tabModesRef.current.delete(""); }
             if (!activeIdRef.current) {
               activeIdRef.current = msg.convId;
               setActiveId(msg.convId);
@@ -1558,9 +1715,14 @@ export function App() {
             else if (ev.type === "error") {
               // The host records the error block in its own transcript.
               s.status = { text: "Error: " + ev.message, error: true };
-            }             else if (ev.type === "mode-changed") {
-              setMode(ev.mode);
-              post({ type: "setMode", mode: ev.mode });
+            } else if (ev.type === "mode-changed") {
+              const targetKey = msg.convId ?? activeIdRef.current ?? "";
+              tabModesRef.current.set(targetKey, ev.mode);
+              if (targetKey === (activeIdRef.current ?? "")) {
+                modeRef.current = ev.mode;
+                setMode(ev.mode);
+              }
+              post({ type: "setMode", mode: ev.mode, ...(msg.convId ? { convId: msg.convId } : {}) });
             }
           }
           // Background runs update their session without rerendering the visible
@@ -1572,6 +1734,7 @@ export function App() {
             ev.type === "tool-call-completed" ||
             ev.type === "tool-call-started" ||
             ev.type === "user-steering" ||
+            ev.type === "retry" ||
             ev.type === "error" ||
             ev.type === "run-result"
           ) {
@@ -1619,9 +1782,13 @@ export function App() {
     const item = queued[i];
     if (activeId && item && !isQueuedSteering(item)) post({ type: "queueAction", convId: activeId, id: item.id, action: "edit" });
   };
-  const runQueuedNow = (i: number) => {
+  const runQueuedNow = (i: number, model?: string) => {
     const item = queued[i];
-    if (activeId && item && !isQueuedSteering(item)) post({ type: "queueAction", convId: activeId, id: item.id, action: "run" });
+    if (activeId && item && !isQueuedSteering(item)) post({ type: "queueAction", convId: activeId, id: item.id, action: "run", ...(model ? { model } : {}) });
+  };
+  const resume429QueuedNow = (i: number, model?: string) => {
+    const item = queued[i];
+    if (activeId && item && !isQueuedSteering(item)) post({ type: "queueAction", convId: activeId, id: item.id, action: "resume429", ...(model ? { model } : {}) });
   };
   const steerQueued = (item: QueuedMessage) => {
     if (activeId && isRunning && item.status === "queued" && item.text.trim() && !item.attachments?.length) {
@@ -1708,11 +1875,42 @@ export function App() {
     }
   };
 
+  const selectTabMode = React.useCallback((m: Mode) => {
+    const currentKey = activeIdRef.current ?? "";
+    for (const t of openTabsRef.current) {
+      if (t !== currentKey && !tabModesRef.current.has(t)) {
+        tabModesRef.current.set(t, initialModeRef.current || modeRef.current);
+      }
+    }
+    tabModesRef.current.set(currentKey, m);
+    modeRef.current = m;
+    setMode(m);
+    post({ type: "setMode", mode: m, ...(activeIdRef.current ? { convId: activeIdRef.current } : {}) });
+    if (workspaceReady.current) {
+      post({ type: "updateChatWorkspace", state: { modes: Object.fromEntries(tabModesRef.current) } });
+    }
+  }, []);
+
+  const selectTabModel = React.useCallback((m: string) => {
+    const currentKey = activeIdRef.current ?? "";
+    for (const t of openTabsRef.current) {
+      if (t !== currentKey && !tabModelsRef.current.has(t) && (initialModelRef.current || selectedModelRef.current)) {
+        tabModelsRef.current.set(t, initialModelRef.current || selectedModelRef.current);
+      }
+    }
+    tabModelsRef.current.set(currentKey, m);
+    selectedModelRef.current = m;
+    setSelectedModel(m);
+    post({ type: "selectModel", model: m, ...(activeIdRef.current ? { convId: activeIdRef.current } : {}) });
+    if (workspaceReady.current) {
+      post({ type: "updateChatWorkspace", state: { models: Object.fromEntries(tabModelsRef.current) } });
+    }
+  }, []);
+
   // Switch to agent mode and kick off implementation of a written plan.
   // Stable identity so memoized tool cards aren't invalidated every frame.
   const onImplement = React.useCallback((planPath: string) => {
-    setMode("agent");
-    post({ type: "setMode", mode: "agent" });
+    selectTabMode("agent");
     const text = planPath
       ? `Implement the plan in \`${planPath}\`. Read it first, then execute every step. Keep going until it is fully done.`
       : "Implement the plan you just wrote. Execute every step until it is fully done.";
@@ -1722,7 +1920,7 @@ export function App() {
     force();
     post(sendMessageIntent(activeIdRef.current, text, undefined, undefined, "agent"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [selectTabMode]);
 
   const onOpenSubagent = React.useCallback((id: string) => setSubTab(id), []);
 
@@ -1765,7 +1963,9 @@ export function App() {
   }, [subTab, subBlock]);
 
   const closeTab = (id: string) => {
-    if (uiPrefsRef.current.perTabDrafts) draftsRef.current.delete(id);
+    if (uiPrefsRef.current.perTabDrafts !== false) draftsRef.current.delete(id);
+    tabModelsRef.current.delete(id);
+    tabModesRef.current.delete(id);
     setOpenTabs((tabs) => {
       const next = tabs.filter((t) => t !== id);
       // If we closed the active tab, switch to another or start fresh
@@ -1793,18 +1993,12 @@ export function App() {
   const onPreviewImage = React.useCallback((images: Attachment[], id: string) => setImagePreview({ images, activeId: id }), []);
 
   // Stable handlers for the memoized bottom composer (always the latest closure).
-  const composerOnMode = useStableCallback((m: Mode) => {
-    setMode(m);
-    post({ type: "setMode", mode: m });
-  });
+  const composerOnMode = useStableCallback((m: Mode) => selectTabMode(m));
   const composerOnTeams = useStableCallback((ids: string[]) => {
     setActiveTeamIds(ids);
     post({ type: "setActiveTeams", teamIds: ids });
   });
-  const composerOnSelectModel = useStableCallback((m: string) => {
-    setSelectedModel(m);
-    post({ type: "selectModel", model: m });
-  });
+  const composerOnSelectModel = useStableCallback((m: string) => selectTabModel(m));
   const composerOnSaveModelOptions = useStableCallback((modelId: string, options: ModelOption[]) => {
     setModelList((prev) => prev.map((m) => (m.id === modelId ? { ...m, options } : m)));
     post({ type: "saveModelOptions", modelId, options });
@@ -1821,6 +2015,7 @@ export function App() {
   const composerOnCancel = useStableCallback(() => post({ type: "cancelRun", convId: activeId }));
 
   return (
+    <ModelPickerContext.Provider value={{ models, modelList, selectedModel }}>
     <div className={"app" + (uiPrefs.chatTextSize !== "default" ? ` text-${uiPrefs.chatTextSize}` : "")}>
       <div className="chat-header">
         <div
@@ -2012,10 +2207,7 @@ export function App() {
                         initialAttachments={turn.attachments}
                         focusKey={`edit-${index}`}
                         mode={mode}
-                        onMode={(m) => {
-                          setMode(m);
-                          post({ type: "setMode", mode: m });
-                        }}
+                        onMode={(m) => selectTabMode(m)}
                         teams={teams}
                         activeTeamIds={activeTeamIds}
                         onTeams={(ids) => {
@@ -2025,10 +2217,7 @@ export function App() {
                         models={models}
                         modelList={modelList}
                         selectedModel={selectedModel}
-                        onSelectModel={(m) => {
-                          setSelectedModel(m);
-                          post({ type: "selectModel", model: m });
-                        }}
+                        onSelectModel={(m) => selectTabModel(m)}
                         onSaveModelOptions={(modelId, options) => {
                           setModelList((prev) => prev.map((m) => (m.id === modelId ? { ...m, options } : m)));
                           post({ type: "saveModelOptions", modelId, options });
@@ -2134,7 +2323,7 @@ export function App() {
             {queued.map((q, i) => (
               <QueuedMessageRow key={q.id} item={q} running={isRunning} canMoveUp={queued.slice(0, i).some(item => !isQueuedSteering(item))}
                 steering={isQueuedSteering(q)}
-                onSteer={() => steerQueued(q)} onRun={() => runQueuedNow(i)}
+                onSteer={() => steerQueued(q)} onRun={(m) => runQueuedNow(i, m)} onResume429={(m) => resume429QueuedNow(i, m)}
                 onEdit={() => editQueued(i)} onRemove={() => removeQueued(i)}
                 onMoveUp={() => activeId && post({ type: "queueAction", convId: activeId, id: q.id, action: "up" })} />
             ))}
@@ -2187,5 +2376,6 @@ export function App() {
         </div>
       )}
     </div>
+    </ModelPickerContext.Provider>
   );
 }

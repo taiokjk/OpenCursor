@@ -43,6 +43,7 @@ const KIND_ICON: Record<string, IconName> = {
   rule: "ruler",
   branch_diff: "gitBranch",
   link: "link",
+  skill: "brain",
 };
 
 function post(msg: OutMessage) {
@@ -1292,7 +1293,7 @@ export function Composer({
 
   const removeAttachment = (id: string) => setAttachments((prev) => prev.filter((a) => a.id !== id));
 
-  // Detect an active "@query" right before the caret (within the current text node).
+  // Detect an active "@query" or "/skill" right before the caret (within the current text node).
   const detectMention = React.useCallback(() => {
     const close = () => {
       setMentionOpen(false);
@@ -1312,15 +1313,21 @@ export function Composer({
     const text = node.textContent || "";
     const caret = range.startOffset;
     const upto = text.slice(0, caret);
-    const at = upto.lastIndexOf("@");
+    // "/" only triggers at a word start, so "@src/a" and "@https://x" stay @-mentions.
+    const atSign = upto.lastIndexOf("@");
+    const slash = upto.lastIndexOf("/");
+    const inAtCategory = atSign !== -1 && mentionCatRef.current !== null && mentionCatRef.current !== "skills";
+    const isSlash = !inAtCategory && slash > atSign && (slash === 0 || /\s/.test(upto[slash - 1]));
+    const at = isSlash ? slash : atSign;
     if (at === -1) {
       close();
       return;
     }
+    if (isSlash !== (mentionCatRef.current === "skills")) setCat(isSlash ? "skills" : null);
     const frag = upto.slice(at + 1);
     const prevChar = at > 0 ? upto[at - 1] : "";
-    // Inside a category, allow spaces in the query (e.g. commit messages).
-    if ((at !== 0 && !/\s/.test(prevChar)) || (mentionCatRef.current === null && /\s/.test(frag))) {
+    // Inside an @ category, allow spaces in the query (e.g. commit messages); skill names never contain spaces.
+    if ((at !== 0 && !/\s/.test(prevChar)) || ((mentionCatRef.current === null || isSlash) && /\s/.test(frag))) {
       close();
       return;
     }
@@ -1333,7 +1340,7 @@ export function Composer({
     mentionQueryRef.current = frag;
     setMentionQuery(frag);
     // Pasting/typing a URL after @ becomes a Link mention.
-    if (/^https?:\/\//.test(frag)) {
+    if (!isSlash && /^https?:\/\//.test(frag)) {
       setCat("link");
       queryMentions("link", frag);
       return;
@@ -1487,10 +1494,12 @@ export function Composer({
             ) : (
               <>
                 <div className="mention-head">
-                  <Icon name="at" size={11} /> {MENTION_CATEGORIES.find((c) => c.id === mentionCat)?.label ?? mentionCat}
+                  {mentionCat === "skills"
+                    ? <><Icon name="brain" size={11} /> Skills</>
+                    : <><Icon name="at" size={11} /> {MENTION_CATEGORIES.find((c) => c.id === mentionCat)?.label ?? mentionCat}</>}
                 </div>
                 {mentionItems.length === 0 ? (
-                  <div className="mention-empty">{mentionCat === "link" ? "Type or paste a URL after @" : "No matches"}</div>
+                  <div className="mention-empty">{mentionCat === "link" ? "Type or paste a URL after @" : mentionCat === "skills" ? "No matching skills" : "No matches"}</div>
                 ) : (
                   mentionItems.map((m, i) => (
                     <div
@@ -1516,7 +1525,7 @@ export function Composer({
           role="textbox"
           aria-label={editing ? "Edit message" : "Message OpenCursor"}
           aria-multiline="true"
-          data-placeholder={isFirst ? "Ask OpenCursor anything, @ to add context" : "Add a follow-up"}
+          data-placeholder={isFirst ? "Ask OpenCursor anything, @ to add context, / for skills" : "Add a follow-up"}
           suppressContentEditableWarning
           onDragOver={(e) => e.preventDefault()}
           onClick={(e) => {
@@ -1654,9 +1663,9 @@ export function Composer({
                   return;
                 }
               }
-              if (e.key === "Escape" || (e.key === "Backspace" && mentionCat !== null && !mentionQuery)) {
+              if (e.key === "Escape" || (e.key === "Backspace" && mentionCat !== null && mentionCat !== "skills" && !mentionQuery)) {
                 e.preventDefault();
-                if (mentionCat !== null) {
+                if (mentionCat !== null && mentionCat !== "skills") {
                   // Back out to the category menu.
                   setCat(null);
                   setMentionItems([]);

@@ -38,6 +38,8 @@ export interface RunSession {
   pendingQuestions: Map<string, (answers: Record<string, string[]>) => void>;
   /** In-chat approval requests keyed by requestId. */
   pendingApprovals: Map<string, { info: PendingApproval; resolve: (ok: boolean) => void }>;
+  /** Active in-place 429 quota countdown resolvers that wake on "Resume now". */
+  quotaWaiters?: Set<(opts?: { callId?: string; model?: string }) => void>;
   /** Authoritative live UI turns, owned by the host so the run survives any webview churn. */
   turns: Turn[];
   /** Live model transcript and checkpoint, saved alongside the rendered turns. */

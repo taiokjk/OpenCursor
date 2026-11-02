@@ -40,7 +40,7 @@ export type AgentEvent =
   | { type: "subagent-event"; callId: string; event: AgentEvent }
   | { type: "mode-changed"; mode: Mode }
   | { type: "shell-notify"; message: string }
-  | { type: "retry"; attempt: number; max: number; delayMs: number; error: string }
+  | { type: "retry"; attempt: number; max: number; delayMs: number; resumeAt?: number; error: string }
   | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string }
   | { type: "max-steps"; steps: number }
   | { type: "error"; message: string };
@@ -88,8 +88,8 @@ export interface ThinkingBlock {
 export interface ErrorBlock {
   kind: "error";
   message: string;
-  /** When set, the run is retrying; shows a transient "retrying" notice. */
-  retrying?: { attempt: number; max: number };
+  /** When set, the run is retrying; shows a transient "retrying" notice (with optional quota resumeAt timestamp). */
+  retrying?: { attempt: number; max: number; resumeAt?: number };
 }
 /** Context-compaction marker: earlier conversation was auto-summarized. */
 export interface CompactionBlock {
@@ -177,6 +177,10 @@ export interface AssistantTurn {
   /** Wall-clock boundaries of this assistant segment, in epoch milliseconds. */
   startedAt?: number;
   endedAt?: number;
+  /** Wall-clock start of an active 429 quota wait, in epoch milliseconds. */
+  waitingStartedAt?: number;
+  /** Cumulative milliseconds spent waiting on 429 quota resets (excluded from working duration). */
+  waitedMs?: number;
   /** Elapsed time retained once this segment settles. */
   durationMs?: number;
   /** The concluding reply identified by the agent after its work finishes. */
@@ -231,17 +235,27 @@ function findToolIndex(blocks: AssistantBlock[], callId: string): number {
 // and a subagent's nested sub-chat). Returns a fresh copy.
 export function applyToBlocks(blocksIn: AssistantBlock[], ev: AgentEvent): AssistantBlock[] {
   const blocks = [...blocksIn];
-  const last = blocks[blocks.length - 1];
+  const dropRetry = () => {
+    const tail = blocks[blocks.length - 1];
+    if (tail && tail.kind === "error" && tail.retrying) blocks.pop();
+  };
+  let last = blocks[blocks.length - 1];
   if (ev.type === "text-delta") {
+    dropRetry();
+    last = blocks[blocks.length - 1];
     if (last && last.kind === "thinking" && !last.endedAt) blocks[blocks.length - 1] = { ...last, endedAt: Date.now() };
     const tail = blocks[blocks.length - 1];
     if (tail && tail.kind === "text") blocks[blocks.length - 1] = { kind: "text", text: tail.text + ev.text };
     else blocks.push({ kind: "text", text: ev.text });
   } else if (ev.type === "thinking-delta") {
+    dropRetry();
+    last = blocks[blocks.length - 1];
     if (last && last.kind === "thinking") blocks[blocks.length - 1] = { ...last, text: last.text + ev.text };
     else blocks.push({ kind: "thinking", text: ev.text, startedAt: Date.now() });
     return blocks;
   } else if (ev.type === "tool-call-started") {
+    dropRetry();
+    last = blocks[blocks.length - 1];
     if (last && last.kind === "thinking" && !last.endedAt) blocks[blocks.length - 1] = { ...last, endedAt: Date.now() };
     const existing = blocks.findIndex((b) => b.kind === "tool" && b.callId === ev.callId);
     const timeoutMs = ev.timeoutMs && ev.timeoutMs > 0 ? ev.timeoutMs : undefined;
@@ -288,7 +302,11 @@ export function applyToBlocks(blocksIn: AssistantBlock[], ev: AgentEvent): Assis
     blocks[i] = { ...b, status: ev.status, result: ev.result, diff: ev.diff, startLine: ev.startLine, endLine: ev.endLine, outcome: ev.outcome ?? b.outcome };
     return blocks;
   } else if (ev.type === "retry") {
-    const note: ErrorBlock = { kind: "error", message: ev.error, retrying: { attempt: ev.attempt, max: ev.max } };
+    const note: ErrorBlock = {
+      kind: "error",
+      message: ev.error,
+      retrying: { attempt: ev.attempt, max: ev.max, ...(ev.resumeAt !== undefined ? { resumeAt: ev.resumeAt } : {}) },
+    };
     if (last && last.kind === "error") blocks[blocks.length - 1] = note;
     else blocks.push(note);
   } else if (ev.type === "error") {
@@ -340,7 +358,15 @@ function updateTool(turns: Turn[], location: ToolLocation, block: ToolBlock): Tu
 function settleTurn(turn: AssistantTurn, endedAt = Date.now()): AssistantTurn {
   if (turn.startedAt == null || turn.endedAt != null) return turn;
   const end = Math.max(turn.startedAt, endedAt);
-  return { ...turn, endedAt: end, durationMs: end - turn.startedAt };
+  const openWait = turn.waitingStartedAt != null ? Math.max(0, end - turn.waitingStartedAt) : 0;
+  const totalWaited = (turn.waitedMs ?? 0) + openWait;
+  return {
+    ...turn,
+    waitingStartedAt: undefined,
+    ...(totalWaited > 0 ? { waitedMs: totalWaited } : {}),
+    endedAt: end,
+    durationMs: Math.max(0, end - turn.startedAt - totalWaited),
+  };
 }
 
 function settleTrailingTurn(turns: Turn[]): Turn[] {
@@ -406,6 +432,10 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
   const dropRetryNote = (turn: AssistantTurn) => {
     const last = turn.blocks[turn.blocks.length - 1];
     if (last && last.kind === "error" && last.retrying) turn.blocks.pop();
+    if (turn.waitingStartedAt != null) {
+      turn.waitedMs = (turn.waitedMs ?? 0) + Math.max(0, Date.now() - turn.waitingStartedAt);
+      turn.waitingStartedAt = undefined;
+    }
   };
 
   const closeThinking = (turn: AssistantTurn) => {
@@ -455,13 +485,19 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
     const startedAt = ev.startedAt;
     if (existing) {
       const prev = existing.block;
-      // Never reopen a settled tool (timeout/cancel may race a late start).
-      if (prev.status !== "running") return turns;
+      // Never reopen a settled tool unless it was previously cancelled/interrupted and is being resumed.
+      const canReopen = prev.status === "running"
+        || prev.result === "(cancelled)"
+        || prev.subStatus === "cancelled"
+        || prev.subStatus === "error";
+      if (!canReopen) return turns;
       return updateTool(turns, existing, {
         ...prev,
         name: ev.name,
         input: mergeToolInput(prev.input, ev.input),
         status: "running",
+        ...(prev.result === "(cancelled)" ? { result: undefined } : {}),
+        ...(prev.subStatus === "cancelled" || prev.subStatus === "error" ? { subStatus: "running" } : {}),
         timeoutMs: timeoutMs ?? prev.timeoutMs,
         startedAt: startedAt ?? prev.startedAt,
       });
@@ -529,7 +565,14 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
   if (ev.type === "retry") {
     const { list, turn } = ensureAssistant(turns);
     const last = turn.blocks[turn.blocks.length - 1];
-    const note = { kind: "error" as const, message: ev.error, retrying: { attempt: ev.attempt, max: ev.max } };
+    const note: ErrorBlock = {
+      kind: "error",
+      message: ev.error,
+      retrying: { attempt: ev.attempt, max: ev.max, ...(ev.resumeAt !== undefined ? { resumeAt: ev.resumeAt } : {}) },
+    };
+    if (ev.resumeAt !== undefined) {
+      turn.waitingStartedAt ??= Date.now();
+    }
     if (last && last.kind === "error") turn.blocks[turn.blocks.length - 1] = note;
     else turn.blocks.push(note);
     return list;
@@ -566,10 +609,14 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
     const child = ev.event;
     if (child.type === "run-result") return turns; // summary lands in tool result
     const b = location.block;
-    if (child.type === "run-status" && child.status === "running" && b.subStatus && b.subStatus !== "running") return turns;
+    if (child.type === "run-status" && child.status === "running" && b.subStatus === "finished") return turns;
     return updateTool(turns, location,
       child.type === "run-status"
-        ? { ...b, subStatus: child.status }
+        ? {
+            ...b,
+            subStatus: child.status,
+            ...(child.status === "running" && b.result === "(cancelled)" ? { status: "running", result: undefined } : {}),
+          }
         : { ...b, subBlocks: applyToBlocks(b.subBlocks ?? [], child) });
   }
 
@@ -615,10 +662,45 @@ export function forceSettleOpenWork(turns: Turn[], reason: "cancelled" | "error"
         changed = true;
         return { ...b, status: "failed" as const };
       }
+      if (b.kind === "error" && b.retrying) {
+        changed = true;
+        return reason === "error" ? { kind: "error" as const, message: b.message } : null;
+      }
       return b;
-    });
+    }).filter((b): b is AssistantBlock => b !== null);
     return settleTurn(changed ? { ...turn, blocks } : turn, endedAt);
   });
+}
+
+/** Clean up trailing error/cancelled markers on the active assistant turn when resuming from a checkpoint. */
+export function reopenInterruptedWorkForResume(turns: Turn[]): Turn[] {
+  if (!turns.length) return turns;
+  const last = turns[turns.length - 1];
+  if (!last || last.role !== "assistant") return turns;
+  const cleanBlocks = (blocks: AssistantBlock[]): AssistantBlock[] =>
+    blocks
+      .filter((b, idx) => !(idx === blocks.length - 1 && b.kind === "error"))
+      .map((b) => {
+        if (b.kind !== "tool") return b;
+        const isTask = b.name === "Task" || b.name === "task";
+        const wasInterruptedTask = isTask && (b.subStatus === "cancelled" || b.subStatus === "error" || b.result === "(cancelled)");
+        if (!wasInterruptedTask) return b;
+        const isBg = b.input?.run_in_background === true && typeof b.result === "string" && b.result.startsWith("Launched ");
+        return {
+          ...b,
+          status: isBg ? "completed" : "running",
+          subStatus: "running",
+          ...(isBg ? {} : { result: undefined }),
+          ...(b.subBlocks ? { subBlocks: cleanBlocks(b.subBlocks) } : {}),
+        };
+      });
+  const prior = [...turns];
+  prior[prior.length - 1] = {
+    ...last,
+    blocks: cleanBlocks(last.blocks),
+    endedAt: undefined,
+  };
+  return prior;
 }
 
 /** Close any still-open trailing thinking block (run settled). */

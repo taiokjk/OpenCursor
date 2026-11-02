@@ -858,6 +858,28 @@ describe("runAgent context consumption", () => {
 		expect(second.history).toContainEqual(expect.objectContaining({ kind: "tool-result", output: expect.stringContaining("DETAIL_PRESERVED_IN_SAVED_TRANSCRIPT") }));
 		for (const request of fixture.requests) expectCompleteToolGroups(request.messages);
 	});
+
+	it("routes Opus compaction summaries to a cheaper available Claude model with low reasoning effort", async () => {
+		const history = olderReadHistory("Inspect dependency initialization.", "DETAIL_FOR_OPUS_SUMMARY");
+		const summary = "Compacted with cheaper model.";
+		const { events } = await run([
+			answer(summary),
+			answer("Completed with Opus."),
+		], {
+			model: "claude-opus-5-5",
+			availableModels: ["claude-opus-5-5", "claude-sonnet-4-6"],
+			modelParams: { thinking: "adaptive", reasoningEffort: "max" },
+			prompt: "Continue with the summary.",
+			history,
+			contextTokens: 12_000,
+			maxTokens: 1024,
+		});
+		expect(events).toContainEqual({ type: "compaction", status: "done", summary });
+		expect(fixture.requests[0].tools).toBeUndefined();
+		expect(fixture.requests[0].model).toBe("claude-sonnet-4-6");
+		expect(fixture.requests[0].modelParams).toMatchObject({ thinking: "disabled", reasoningEffort: "low" });
+		expect(fixture.requests[1].model).toBe("claude-opus-5-5");
+	});
 });
 
 describe("chat-only account transport capabilities", () => {
@@ -1565,5 +1587,205 @@ describe("batch ordering and abort registration", () => {
     expect(aborts.has("read-1")).toBe(true);
     aborts.get("read-1")!();
     expect(toolSignal?.aborted).toBe(false);
+  });
+
+  it("pauses in-place on 429 with a resumeAt countdown and resumes when waitForQuotaReset resolves", async () => {
+    const waitForQuotaReset = vi.fn(async (_resumeAt: number, _signal: AbortSignal) => "manual" as const);
+    const { events } = await run([
+      () => {
+        throw Object.assign(new Error("Claude Code quota expired until 1:59:59 PM · try again in 20 minutes"), {
+          name: "ChatHTTPError",
+          status: 429,
+          retryAfterMs: 1_200_000,
+        });
+      },
+      answer("Resumed and completed after quota wait."),
+    ], { waitForQuotaReset });
+
+    expect(waitForQuotaReset).toHaveBeenCalledOnce();
+    const retryEvents = events.filter((e) => e.type === "retry");
+    expect(retryEvents).toHaveLength(1);
+    expect(retryEvents[0]).toMatchObject({
+      type: "retry",
+      attempt: 1,
+      max: 5,
+      resumeAt: expect.any(Number),
+      error: expect.stringContaining("Claude Code quota expired"),
+    });
+    expectFinished(events, "Resumed and completed after quota wait.", 2);
+  });
+
+  it("persists calibrated promptTokenRatio across turns so follow-up 'continue your work' compacts before step 0 instead of step 1", async () => {
+    const contextState: NonNullable<RunAgentOptions["contextState"]> = {};
+    const bigOutput = Array.from({ length: 450 }, (_, i) => `line_${i}: export const val_${i} = "some code payload";`).join("\n");
+    vi.spyOn(TOOLS.Read, "execute").mockResolvedValue({ output: bigOutput });
+
+    // First run: char estimate is ~10,500 tokens (under 20,000 budget), but provider reports 16,000 actual promptTokens (ratio ~1.5x).
+    const first = await run([
+      toolTurn(call("Read", { path: "a.ts" }, "read-a")),
+      toolTurn(call("Read", { path: "b.ts" }, "read-b")),
+      [...answer("Completed initial reads."), { type: "usage", promptTokens: 16_000, completionTokens: 100 }],
+    ], { prompt: "Start inspecting the files.", contextTokens: 20_000, maxTokens: 1024, contextState });
+    expectFinished(first.events, "Completed initial reads.", 3);
+    expect(contextState.promptTokenRatio).toBeGreaterThan(1.2);
+
+    const restored = JSON.parse(JSON.stringify({ history: first.history, contextState })) as {
+      history: Step[];
+      contextState: NonNullable<RunAgentOptions["contextState"]>;
+    };
+    fixture.requests.length = 0;
+    fixture.turns.length = 0;
+
+    // Follow-up run ("continue your work"): should compact BEFORE step 0 using persisted promptTokenRatio,
+    // rather than sending uncompacted step 0 and then compacting on step 1.
+    const second = await run([
+      (request) => {
+        // First request in the follow-up run must be the summarizer call (tools === undefined)
+        expect(request.tools).toBeUndefined();
+        return answer("Summary of initial reads.");
+      },
+      (request) => {
+        expect(request.tools).toBeDefined();
+        expect(JSON.stringify(request.messages)).toContain("Summary of initial reads.");
+        return answer("Continued work efficiently.");
+      },
+    ], { prompt: "continue your work", ...restored, contextTokens: 20_000, maxTokens: 1024 });
+    expectFinished(second.events, "Continued work efficiently.", 2);
+  });
+
+  it("continues directly from the last checkpoint when resumeFromCheckpoint is true without adding a new user message", async () => {
+    const history: Step[] = [
+      { kind: "user", text: "Implement the photobooth timer" },
+      { kind: "assistant", text: "", calls: [call("Read", { path: "timer.ts" }, "read-timer")] },
+      { kind: "tool-result", callId: "read-timer", name: "Read", output: "export const timer = 3;", status: "completed" },
+    ];
+    const { events, history: finalHistory } = await run([
+      (request) => {
+        const userMsgs = request.messages.filter((m) => m.role === "user");
+        expect(userMsgs).toHaveLength(1);
+        expect(JSON.stringify(userMsgs[0].content)).toContain("Implement the photobooth timer");
+        return answer("Finished implementing the photobooth timer from the checkpoint.");
+      },
+    ], { prompt: "Implement the photobooth timer", history, resumeFromCheckpoint: true });
+    expectFinished(events, "Finished implementing the photobooth timer from the checkpoint.", 1);
+    expect(finalHistory.filter((s) => s.kind === "user" && !s.synthetic)).toHaveLength(1);
+  });
+
+  it("resumes an interrupted subagent from its saved collaborator checkpoint when resumeFromCheckpoint is true", async () => {
+    const childHistory: Step[] = [
+      { kind: "user", text: "Inspect worker.ts and summarize" },
+      { kind: "assistant", text: "", calls: [call("Read", { path: "worker.ts" }, "sub-read-1")] },
+      { kind: "tool-result", callId: "sub-read-1", name: "Read", output: "export const worker = true;", status: "completed" },
+      { kind: "user", text: "The user stopped the previous run. Earlier tool calls and results retain the observations and outcomes already recorded; the last assistant response may be incomplete. Continue from that evidence when requested, checking only unfinished or potentially changed work.", synthetic: true },
+    ];
+    const history: Step[] = [
+      { kind: "user", text: "Delegate worker inspection to a subagent" },
+      { kind: "assistant", text: "", calls: [call("Task", { prompt: "Inspect worker.ts and summarize", description: "Inspect worker" }, "sub-task-1")] },
+      { kind: "tool-result", callId: "sub-task-1", name: "Task", output: "(subagent cancelled)", status: "completed" },
+      { kind: "user", text: "The user stopped the previous run. Earlier tool calls and results retain the observations and outcomes already recorded; the last assistant response may be incomplete. Continue from that evidence when requested, checking only unfinished or potentially changed work.", synthetic: true },
+    ];
+    const contextState: NonNullable<RunAgentOptions["contextState"]> = {
+      agents: [{
+        id: "sub-task-1",
+        title: "Inspect worker",
+        model: "test-model",
+        readonly: false,
+        status: "interrupted",
+        result: "(subagent cancelled)",
+        history: childHistory,
+        mailbox: [],
+        updatedAt: Date.now(),
+      }],
+    };
+    const { events, history: finalHistory } = await run([
+      (subRequest) => {
+        // First LLM call should be the resumed subagent continuing from its Read result
+        expect(JSON.stringify(subRequest.messages)).toContain("export const worker = true;");
+        return answer("Subagent summary: worker.ts exports worker = true.");
+      },
+      (parentRequest) => {
+        // Second LLM call is the parent receiving the completed subagent summary
+        expect(JSON.stringify(parentRequest.messages)).toContain("Subagent summary: worker.ts exports worker = true.");
+        expect(JSON.stringify(parentRequest.messages)).not.toContain("(subagent cancelled)");
+        return answer("Parent finished using the resumed subagent summary.");
+      },
+    ], { prompt: "Delegate worker inspection to a subagent", history, contextState, resumeFromCheckpoint: true });
+    expectFinished(events, "Parent finished using the resumed subagent summary.", 2);
+    expect(finalHistory).toContainEqual(expect.objectContaining({
+      kind: "tool-result",
+      callId: "sub-task-1",
+      output: expect.stringContaining("Subagent summary: worker.ts exports worker = true."),
+    }));
+  });
+
+  it("switches to the user-selected model and provider when waitForQuotaReset returns a replacement model on 429", async () => {
+    const seenRequests: { model: string; oauthKind?: string }[] = [];
+    const { events } = await run([
+      (req) => {
+        seenRequests.push({ model: req.model, oauthKind: req.oauthKind });
+        throw new Error("HTTP 429 Too Many Requests: quota exceeded until 1:59:59 PM");
+      },
+      (req) => {
+        seenRequests.push({ model: req.model, oauthKind: req.oauthKind });
+        return answer("Resumed and completed on Gemini 4 Argon.");
+      },
+    ], {
+      model: "claude-opus-5-5",
+      oauthKind: "claude-code",
+      waitForQuotaReset: async () => ({ action: "manual", model: "__oauth__:antigravity::gemini-4-argon-high" }),
+      resolveModelOptions: (nextModel) => ({
+        model: nextModel.includes("::") ? nextModel.slice(nextModel.indexOf("::") + 2) : nextModel,
+        oauthKind: nextModel.startsWith("__oauth__:antigravity::") ? "antigravity" : "claude-code",
+        contextTokens: 1_000_000,
+      }),
+    });
+    expectFinished(events, "Resumed and completed on Gemini 4 Argon.", 2);
+    expect(seenRequests).toEqual([
+      { model: "claude-opus-5-5", oauthKind: "claude-code" },
+      { model: "gemini-4-argon-high", oauthKind: "antigravity" },
+    ]);
+  });
+
+  it("routes built-in specialist subagents to their configured Claude Code and Google Antigravity Gemini models via resolveModelOptions", async () => {
+    const { BUILTIN_TEAM_SUBAGENTS } = await import("./teams.js");
+    const explorer = BUILTIN_TEAM_SUBAGENTS.find((s: { id: string }) => s.id === "team-explorer")!;
+    const backend = BUILTIN_TEAM_SUBAGENTS.find((s: { id: string }) => s.id === "team-backend-developer")!;
+    const architect = BUILTIN_TEAM_SUBAGENTS.find((s: { id: string }) => s.id === "team-architect")!;
+    expect(explorer.model).toBe("__oauth__:antigravity::gemini-3.8-flash-high");
+    expect(backend.model).toBe("__oauth__:claude-code::claude-sonnet-5-5");
+    expect(architect.model).toBe("__oauth__:claude-code::claude-opus-5-5");
+    for (const sub of BUILTIN_TEAM_SUBAGENTS) {
+      if (sub.model?.startsWith("__oauth__:antigravity::")) {
+        expect(sub.model).toMatch(/^__oauth__:antigravity::gemini-/);
+      }
+    }
+
+    const seenSubRequests: { model: string; oauthKind?: string }[] = [];
+    const { events } = await run([
+      toolTurn(call("Task", { prompt: "Map the repo", description: "Explore repo", subagent_type: "Explorer" }, "exp-1")),
+      (subReq) => {
+        seenSubRequests.push({ model: subReq.model, oauthKind: subReq.oauthKind });
+        return answer("Repo mapped by Explorer.");
+      },
+      answer("Done."),
+    ], {
+      model: "claude-opus-5-5",
+      oauthKind: "claude-code",
+      customSubagents: BUILTIN_TEAM_SUBAGENTS,
+      availableModels: [
+        "__oauth__:claude-code::claude-opus-5-5",
+        "__oauth__:claude-code::claude-sonnet-5-5",
+        "__oauth__:antigravity::gemini-3.8-flash-high",
+      ],
+      resolveModelOptions: (childModel) => ({
+        model: childModel.includes("::") ? childModel.slice(childModel.indexOf("::") + 2) : childModel,
+        oauthKind: childModel.startsWith("__oauth__:antigravity::") ? "antigravity" : "claude-code",
+        contextTokens: 1_000_000,
+      }),
+    });
+    expectFinished(events, "Done.", 3);
+    expect(seenSubRequests).toEqual([
+      { model: "gemini-3.8-flash-high", oauthKind: "antigravity" },
+    ]);
   });
 });

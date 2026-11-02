@@ -14,8 +14,11 @@ import { Icon } from "../../shared/icons";
 
 export interface WorkingSectionProps {
   running: boolean;
+  waiting?: boolean;
   startedAt?: number;
   endedAt?: number;
+  waitingStartedAt?: number;
+  waitedMs?: number;
   durationMs?: number;
   activity: React.ReactNode;
   conclusion?: React.ReactNode;
@@ -42,13 +45,21 @@ function durationParts(milliseconds: number): { value: number; unit: string }[] 
 
 /** Keep the live clock local to the activity header, without rerendering the transcript. */
 export function WorkingSection({
-  running, startedAt, endedAt, durationMs, activity, conclusion,
+  running, waiting = false, startedAt, endedAt, waitingStartedAt, waitedMs, durationMs, activity, conclusion,
   hasActivity, forceOpen = false, status,
 }: WorkingSectionProps) {
   const bodyId = React.useId();
   const [clock, setClock] = React.useState(() => {
     const now = Date.now();
-    return { running, now, startedAt: running ? now : undefined, endedAt: undefined as number | undefined };
+    return {
+      running,
+      waiting,
+      now,
+      startedAt: running ? now : undefined,
+      endedAt: undefined as number | undefined,
+      waitingStartedAt: running && waiting ? now : undefined,
+      waitedMs: 0,
+    };
   });
   const [expansion, setExpansion] = React.useState({ running, open: running });
 
@@ -56,7 +67,24 @@ export function WorkingSection({
   // messages without recorded timing never inherit the time the view was mounted.
   if (clock.running !== running) {
     const now = Date.now();
-    setClock({ running, now, startedAt: running ? now : clock.startedAt, endedAt: running ? undefined : now });
+    const extraWait = clock.waiting && clock.waitingStartedAt !== undefined ? Math.max(0, now - clock.waitingStartedAt) : 0;
+    setClock({
+      running,
+      waiting: running ? waiting : false,
+      now,
+      startedAt: running ? now : clock.startedAt,
+      endedAt: running ? undefined : now,
+      waitingStartedAt: running && waiting ? now : undefined,
+      waitedMs: running ? 0 : clock.waitedMs + extraWait,
+    });
+  } else if (running && clock.waiting !== waiting) {
+    const now = Date.now();
+    if (waiting) {
+      setClock({ ...clock, waiting: true, now, waitingStartedAt: validTime(waitingStartedAt) ? waitingStartedAt : now });
+    } else {
+      const extraWait = clock.waitingStartedAt !== undefined ? Math.max(0, now - clock.waitingStartedAt) : 0;
+      setClock({ ...clock, waiting: false, now, waitingStartedAt: undefined, waitedMs: clock.waitedMs + extraWait });
+    }
   }
   if (expansion.running !== running) setExpansion({ running, open: running });
 
@@ -67,12 +95,21 @@ export function WorkingSection({
   }, [running]);
 
   const start = validTime(startedAt) ? startedAt : clock.startedAt;
-  const end = running ? clock.now : validTime(endedAt) ? endedAt : clock.endedAt;
+  const totalWaited = validTime(waitedMs) ? waitedMs : clock.waitedMs;
+  const waitStart = waiting ? (validTime(waitingStartedAt) ? waitingStartedAt : clock.waitingStartedAt ?? clock.now) : undefined;
+  const currentWait = waiting && validTime(waitStart) ? Math.max(0, clock.now - waitStart) : 0;
+  const end = running ? (waiting && validTime(waitStart) ? waitStart : clock.now) : validTime(endedAt) ? endedAt : clock.endedAt;
   const elapsed = !running && validTime(durationMs) ? durationMs
-    : validTime(start) && validTime(end) ? Math.max(0, end - start) : undefined;
+    : validTime(start) && validTime(end) ? Math.max(0, end - start - totalWaited) : undefined;
   const parts = elapsed !== undefined && (!running || elapsed >= 1000) ? durationParts(elapsed) : [];
   const prefix = `${running ? "Working" : "Worked"}${parts.length ? " for" : ""}`;
   const label = prefix + (parts.length ? ` ${parts.map(part => `${part.value}${part.unit}`).join(" ")}` : "");
+
+  const waitElapsed = waiting ? totalWaited + currentWait : undefined;
+  const waitParts = waitElapsed !== undefined && waitElapsed >= 1000 ? durationParts(waitElapsed) : [];
+  const waitPrefix = `Waiting${waitParts.length ? " for" : ""}`;
+  const waitLabel = waitPrefix + (waitParts.length ? ` ${waitParts.map(part => `${part.value}${part.unit}`).join(" ")}` : "");
+
   const open = forceOpen || (expansion.running === running ? expansion.open : running);
 
   // Retain the visible activity throughout the closing transition. The parent may
@@ -92,6 +129,15 @@ export function WorkingSection({
         </span>)}
       </span>}
     </span>
+    {waiting && <span className="working-title waiting-title" role="timer" aria-live="off" aria-label={waitLabel}>
+      <span className="working-prefix" aria-hidden="true">· {waitPrefix}</span>
+      {waitParts.length > 0 && <span className="working-duration" aria-hidden="true">
+        {waitParts.map(part => <span key={part.unit} className="working-time-part" data-unit={part.unit}>
+          <ReelCounter value={part.value} variant="step" className="working-time-value" />
+          <span className="working-time-unit">{part.unit}</span>
+        </span>)}
+      </span>}
+    </span>}
     {hasActivity && <Icon name="chevR" size={12} className="working-chevron" />}
   </>;
 

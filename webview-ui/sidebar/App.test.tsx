@@ -20,7 +20,7 @@ vi.mock("../shared/vscode", () => ({ vscode: { postMessage: vi.fn() } }));
 const composerRenders = vi.hoisted(() => ({ count: 0 }));
 vi.mock("./components/Composer", () => ({
   KIND_SVG: {}, applyFileIconTo: vi.fn(),
-  Composer: (props: any) => (composerRenders.count++, <div data-testid="composer" data-running={props.isRunning}><button data-testid="send" onClick={() => props.onSubmit("queued-A", [])}>Send fixture</button><button data-testid="agent" onClick={() => props.onMode("agent")}>Agent mode</button></div>),
+  Composer: (props: any) => (composerRenders.count++, <div data-testid="composer" data-running={props.isRunning} data-model={props.selectedModel} data-mode={props.mode} data-draft={props.tabDraft?.text ?? ""}><button data-testid="send" onClick={() => props.onSubmit("queued-A", [])}>Send fixture</button><button data-testid="agent" onClick={() => props.onMode("agent")}>Agent mode</button><button data-testid="select-model-b" onClick={() => props.onSelectModel("api::model-B")}>Select model B</button></div>),
 }));
 let root: Root, container: HTMLDivElement;
 beforeEach(() => {
@@ -787,5 +787,123 @@ describe("production chat application lifecycle", () => {
     initial({ runningConvIds: [], turns: [{ role: "assistant", blocks: [{ kind: "verification", summary: { status, revision: 0, changedPaths: [], checks: [{ command: "pnpm test", revision: 0, status: checkStatus, exitCode, at: 1 }] } }] }] });
     expect(container.querySelector(".verification-card")?.textContent).toContain(label);
     expect(container.querySelector(".verification-card")?.textContent).toContain("pnpm test");
+  });
+
+  it("renders a live countdown timer and Resume now button on 429 quota retry and posts resumeQuotaWait", () => {
+    vi.useFakeTimers();
+    const now = new Date(2026, 10, 1, 12, 40, 9, 0).getTime();
+    vi.setSystemTime(now);
+    const resumeAt = new Date(2026, 10, 1, 13, 59, 59, 0).getTime(); // 1h 19m 50s later
+    initial();
+    message({
+      type: "agentEvent",
+      convId: "A",
+      event: {
+        type: "retry",
+        attempt: 1,
+        max: 5,
+        delayMs: resumeAt - now,
+        resumeAt,
+        error: "claude-code 429: Rate limit exceeded",
+      },
+    });
+    const card = container.querySelector(".error-card.retrying")!;
+    expect(card).not.toBeNull();
+    expect(card.textContent).toContain("1h 19m 50s");
+
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(card.textContent).toContain("1h 19m 40s");
+
+    const resumeBtn = Array.from(card.querySelectorAll("button")).find((b) => b.textContent?.includes("Resume now"))!;
+    expect(resumeBtn).toBeDefined();
+    vi.mocked(vscode.postMessage).mockClear();
+    act(() => {
+      resumeBtn.click();
+    });
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "resumeQuotaWait" });
+    vi.useRealTimers();
+  });
+
+  it("lets the user pick a replacement model on a 429 quota wait card and sends it with resumeQuotaWait", () => {
+    const resumeAt = Date.now() + 90_000;
+    initial({
+      activeId: "A",
+      selectedModel: "__oauth__:claude-code::claude-opus-5-5",
+    });
+    message({
+      type: "modelsFetched",
+      models: ["__oauth__:claude-code::claude-opus-5-5", "__oauth__:antigravity::gemini-4-argon-high"],
+      modelList: [
+        { id: "__oauth__:claude-code::claude-opus-5-5", name: "Claude Opus 5.5", kind: "claude-code", providerName: "Claude Code", options: [] },
+        { id: "__oauth__:antigravity::gemini-4-argon-high", name: "Gemini 4 Argon (High)", kind: "antigravity", providerName: "Google Antigravity", options: [] },
+      ],
+    });
+    message({
+      type: "agentEvent",
+      convId: "A",
+      event: {
+        type: "retry",
+        attempt: 1,
+        max: 4,
+        delayMs: 90_000,
+        resumeAt,
+        error: "HTTP 429 Too Many Requests: quota reset at 1:59:59 PM",
+      },
+    });
+    const modelTrigger = container.querySelector<HTMLElement>(".quota-wait .model-select")!;
+    expect(modelTrigger).not.toBeNull();
+    act(() => modelTrigger.click());
+    const geminiItem = Array.from(document.body.querySelectorAll<HTMLElement>(".model-picker .model-item")).find(
+      (el) => el.textContent?.includes("Gemini 4 Argon (High)"),
+    )!;
+    expect(geminiItem).not.toBeUndefined();
+    act(() => geminiItem.click());
+
+    const resumeBtn = container.querySelector<HTMLButtonElement>(".quota-resume-btn")!;
+    vi.mocked(vscode.postMessage).mockClear();
+    act(() => resumeBtn.click());
+    expect(vscode.postMessage).toHaveBeenCalledWith({
+      type: "resumeQuotaWait",
+      model: "__oauth__:antigravity::gemini-4-argon-high",
+    });
+  });
+
+  it("keeps composer drafts and selected models isolated per tab", () => {
+    initial({
+      activeId: "A",
+      mode: "ask",
+      selectedModel: "api::model-A",
+      workspaceState: {
+        openTabs: ["A", "B"],
+        drafts: {
+          A: { text: "Draft only for tab A", attachments: [] },
+          B: { text: "Draft only for tab B", attachments: [] },
+        },
+      },
+    });
+    const comp = () => container.querySelector<HTMLElement>('[data-testid="composer"]')!;
+    expect(comp().dataset.draft).toBe("Draft only for tab A");
+    expect(comp().dataset.model).toBe("api::model-A");
+    expect(comp().dataset.mode).toBe("ask");
+
+    // Change model and mode in Tab A
+    act(() => container.querySelector<HTMLElement>('[data-testid="select-model-b"]')!.click());
+    act(() => container.querySelector<HTMLElement>('[data-testid="agent"]')!.click());
+    expect(comp().dataset.model).toBe("api::model-B");
+    expect(comp().dataset.mode).toBe("agent");
+
+    // Switch to Tab B: Tab B keeps its own draft, its original model (api::model-A), and its original mode (ask)
+    message({ type: "loadConversation", activeId: "B", turns: [], running: false });
+    expect(comp().dataset.draft).toBe("Draft only for tab B");
+    expect(comp().dataset.model).toBe("api::model-A");
+    expect(comp().dataset.mode).toBe("ask");
+
+    // Switch back to Tab A: Tab A still has api::model-B, agent mode, and its own draft
+    message({ type: "loadConversation", activeId: "A", turns: [], running: false });
+    expect(comp().dataset.draft).toBe("Draft only for tab A");
+    expect(comp().dataset.model).toBe("api::model-B");
+    expect(comp().dataset.mode).toBe("agent");
   });
 });

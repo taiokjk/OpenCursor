@@ -865,7 +865,7 @@ export function App() {
                   <Toggle checked={features.autoGenerateTitles !== false} onChange={(v) => setFeatures({ autoGenerateTitles: v })} />
                 </Row>
                 <Row title="Per-Tab Composer Drafts" desc="Keep a separate unsent message per chat tab. When off, the composer text follows you between tabs.">
-                  <Toggle checked={features.perTabDrafts === true} onChange={(v) => setFeatures({ perTabDrafts: v })} />
+                  <Toggle checked={features.perTabDrafts !== false} onChange={(v) => setFeatures({ perTabDrafts: v })} />
                 </Row>
                 {/* Auto model (judge routing) hidden for now — bring back later.
                 <Row title="Auto Judge Model" desc="When the chat model is set to Auto, this judge model picks the best enabled model for each task.">

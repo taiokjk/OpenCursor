@@ -137,3 +137,29 @@ it("freezes elapsed time and clears its interval when stopped or unmounted", () 
   act(() => root.render(null));
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it("freezes Working for ... while waiting for 429 and increments a separate Waiting for ... counter", () => {
+  render();
+  advance(5000);
+  expect(label()).toBe("Working for 5s");
+  expect(container.querySelector(".waiting-title")).toBeNull();
+
+  // Enter 429 waiting state
+  render({ waiting: true });
+  expect(label()).toBe("Working for 5s");
+  expect(container.querySelector(".waiting-title")?.getAttribute("aria-label")).toBe("Waiting");
+
+  advance(12_000);
+  // Working time must stay frozen at 5s while Waiting for ... counts up to 12s
+  expect(label()).toBe("Working for 5s");
+  expect(container.querySelector(".waiting-title")?.getAttribute("aria-label")).toBe("Waiting for 12s");
+
+  // Resume working after 429 clears
+  render({ waiting: false });
+  expect(container.querySelector(".waiting-title")).toBeNull();
+  expect(label()).toBe("Working for 5s");
+
+  advance(4000);
+  expect(label()).toBe("Working for 9s");
+});
+

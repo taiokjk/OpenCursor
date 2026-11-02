@@ -224,15 +224,15 @@ const CURATED_MODEL_CATALOG: ModelDef[] = [
 	{ id: "qwen3.8-max", name: "Qwen3.8 Max", kind: "qwen", options: [thinking("enabled", ["disabled", "enabled"]), effort("xhigh", ["low", "medium", "xhigh"]), ctx(["128k", "256k", "1m"], "1m")] },
 	{ id: "qwen3.8-flash", name: "Qwen3.8 Flash", kind: "qwen", options: [thinking("enabled", ["disabled", "enabled"]), effort("xhigh", ["low", "medium", "xhigh"]), ctx(["128k", "256k", "1m"], "1m")] },
 
-	// Models exposed by Google Antigravity accounts.
+	// Models exposed by Google Antigravity accounts (Gemini-only enabled by default).
 	{ id: "gemini-3-flash-agent", name: "Gemini 3.5 Flash (High)", kind: "antigravity", enabled: true },
 	{ id: "gemini-3.5-flash-low", name: "Gemini 3.5 Flash (Medium)", kind: "antigravity", enabled: true },
 	{ id: "gemini-3.5-flash-extra-low", name: "Gemini 3.5 Flash (Low)", kind: "antigravity", enabled: true },
 	{ id: "gemini-pro-agent", name: "Gemini 3.1 Pro (High)", kind: "antigravity", enabled: true },
 	{ id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)", kind: "antigravity", enabled: true },
-	{ id: "claude-sonnet-4-6", name: "Sonnet 4.6 (Thinking)", kind: "antigravity", enabled: true },
-	{ id: "claude-opus-4-6-thinking", name: "Opus 4.6 (Thinking)", kind: "antigravity", enabled: true },
-	{ id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", kind: "antigravity", enabled: true },
+	{ id: "claude-sonnet-4-6", name: "Sonnet 4.6 (Thinking)", kind: "antigravity", enabled: false },
+	{ id: "claude-opus-4-6-thinking", name: "Opus 4.6 (Thinking)", kind: "antigravity", enabled: false },
+	{ id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", kind: "antigravity", enabled: false },
 	{ id: "gemini-3-flash", name: "Gemini 3 Flash", kind: "antigravity", enabled: true },
 
 	{ id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", kind: "antigravity", enabled: false },
@@ -255,7 +255,8 @@ export const MODEL_CATALOG: ModelDef[] = (() => {
 	const knownKinds = new Set<string>([...Object.keys(PROVIDER_PRESETS), ...OAUTH_KINDS]);
 	for (const model of PROVIDER_MODELS) {
 		if (!knownKinds.has(model.kind) || catalog.some(existing => existing.id === model.id && kindMatches(existing.kind, model.kind))) continue;
-		catalog.push({ id: model.id, name: model.name, kind: model.kind as ModelKind, ...(model.contextLength ? { options: [{ key: "max_context", label: "Context budget", type: "select" as const, values: [String(model.contextLength)], value: String(model.contextLength) }] } : {}) });
+		const nonGeminiAntigravity = model.kind === "antigravity" && !/^gemini-/i.test(model.id);
+		catalog.push({ id: model.id, name: model.name, kind: model.kind as ModelKind, ...(nonGeminiAntigravity ? { enabled: false } : {}), ...(model.contextLength ? { options: [{ key: "max_context", label: "Context budget", type: "select" as const, values: [String(model.contextLength)], value: String(model.contextLength) }] } : {}) });
 	}
 	return catalog;
 })();
@@ -313,6 +314,8 @@ export interface FeatureConfig {
 	activeTeamIds: string[];
 	/** Default model for subagents launched via the task tool ("" = inherit chat model). */
 	subagentModel: string;
+	/** Migration marker so existing installs upgrade to the optimized subagent default model. */
+	subagentModelsV2?: boolean;
 	/** Judge model used by Auto mode to pick a model for each task ("" = first enabled). */
 	autoJudgeModel: string;
 	/** Local embedding model id for the semantic codebase index. */
@@ -350,6 +353,8 @@ export interface FeatureConfig {
 	maxTabCount: number;
 	/** Keep a separate composer draft per chat tab (off = one shared composer). */
 	perTabDrafts: boolean;
+	/** Migration marker so existing installs upgrade to per-tab drafts by default. */
+	perTabDraftsV2?: boolean;
 	/** Max agent steps per run before pausing (0 = default 50). */
 	maxAgentSteps: number;
 	/** Per-tool hard timeout overrides in seconds (empty = built-in defaults). */
@@ -385,7 +390,8 @@ const DEFAULTS: FeatureConfig = {
 	subagents: [],
 	teams: [],
 	activeTeamIds: ["team-full-stack"],
-	subagentModel: "",
+	subagentModel: "__oauth__:antigravity::gemini-3.8-flash-high",
+	subagentModelsV2: true,
 	autoJudgeModel: "",
 	embedModel: "minilm",
 	embedAccelerator: "cpu",
@@ -406,7 +412,8 @@ const DEFAULTS: FeatureConfig = {
 	motion: "full",
 	submitWithCtrlEnter: false,
 	maxTabCount: 0,
-	perTabDrafts: false,
+	perTabDrafts: true,
+	perTabDraftsV2: true,
 	maxAgentSteps: 50,
 	toolTimeoutsSec: {},
 	autoContinue: false,
@@ -434,6 +441,14 @@ export class FeatureStore {
 	get(): FeatureConfig {
 		const stored = this.context.globalState.get<Partial<FeatureConfig>>(KEY) ?? {};
 		const cfg = { ...DEFAULTS, ...stored };
+		if (!stored.perTabDraftsV2) {
+			cfg.perTabDrafts = true;
+			cfg.perTabDraftsV2 = true;
+		}
+		if (!stored.subagentModelsV2) {
+			if (!stored.subagentModel) cfg.subagentModel = "__oauth__:antigravity::gemini-3.8-flash-high";
+			cfg.subagentModelsV2 = true;
+		}
 		// Built-in team members/teams are always available, even for configs saved before they shipped.
 		cfg.subagents = withBuiltinTeamSubagents(cfg.subagents ?? [], cfg.builtinSubagentOverrides);
 		cfg.teams = withBuiltinTeams(cfg.teams ?? []);

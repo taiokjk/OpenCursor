@@ -21,6 +21,10 @@ export interface ContextState {
     steps: Step[];
   };
   todos?: TodoItem[];
+  /** Calibrated provider token-to-estimate ratio, persisted across turns to prevent step-0/step-1 compaction whiplash. */
+  promptTokenRatio?: number;
+  /** Timestamp (epoch ms) of the last prompt usage report, used to detect expired 5m prompt caches. */
+  lastPromptAt?: number;
 }
 
 function prefixDigest(history: Step[], count: number): string {
@@ -61,6 +65,8 @@ export function restoreContext(history: Step[], state?: ContextState): Step[] {
     if (state && saved) {
       state.checkpoint = undefined;
       state.todos = undefined;
+      state.promptTokenRatio = undefined;
+      state.lastPromptAt = undefined;
     }
     return [...history];
   }

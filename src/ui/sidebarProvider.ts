@@ -31,11 +31,11 @@ import { runHooks, runBlockingHooks } from "../integrations/hooksRunner";
 import { findWorkspaceRoot, getWorkspaceRoot, safePath, withWorkspaceRoot } from "../context/workspaceUtils";
 import { allPersonas, getPersona } from "../agent/personas";
 import { pendingChanges, computeHunks } from "../stores/pendingChanges";
-import { applyEvent, closeTrailingThinking, forceSettleOpenWork, parseMentionTokens, renderMentionTokens, setQuestionAnswers, turnsToTranscript, type AgentEvent as SharedAgentEvent, type Turn } from "../shared/turns";
+import { applyEvent, closeTrailingThinking, forceSettleOpenWork, parseMentionTokens, reopenInterruptedWorkForResume, renderMentionTokens, setQuestionAnswers, turnsToTranscript, type AgentEvent as SharedAgentEvent, type Turn } from "../shared/turns";
 import { resolveFileIcon, invalidateFileIconCache } from "./fileIcons";
 import {
   searchFilesAndFolders, searchCommits, searchDocSources, searchTerminals,
-  searchRules, searchCode, branchDiffItem, resolveMentions, type MentionItem as HostMentionItem,
+  searchRules, searchCode, searchSkills, findSkill, branchDiffItem, resolveMentions, type MentionItem as HostMentionItem,
 } from "../context/mentions";
 import { getLog, logError } from "../logging";
 import { randomUUID } from "node:crypto";
@@ -146,8 +146,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       await this._store.setActiveId(id);
     }
     if (this._deleting.has(id) || !this._store.has(id)) return;
+    const convMeta = this._store.getMetadata(id);
+    const effectiveModel = data.model ?? convMeta?.model ?? this.settingsManager.getSettings().model;
+    const effectiveMode = data.mode ?? convMeta?.mode ?? this._currentMode;
+    if (convMeta && (convMeta.model !== effectiveModel || convMeta.mode !== effectiveMode)) {
+      await this._store.update(id, { model: effectiveModel, mode: effectiveMode });
+    }
     const item: QueuedMessage = { id: data.requestId || randomUUID(), text: data.text, attachments: data.attachments,
-      model: data.model ?? this.settingsManager.getSettings().model, mode: data.mode ?? this._currentMode, createdAt: Date.now(), status: "queued" };
+      model: effectiveModel, mode: effectiveMode, createdAt: Date.now(), status: "queued" };
     const enqueued = await this._store.enqueue(id, item);
     this._view?.webview.postMessage({ type: "requestAccepted", requestId: item.id, convId: id, created });
     this._sendConversations();
@@ -182,8 +188,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         let result: string | undefined;
         let failure: string | undefined;
         try {
-          const prompt = next.resume ? `Continue this interrupted request. First reconcile the current files and conversation with work already completed. Do not blindly repeat commands or external side effects. Complete only the remaining work.\n\nOriginal request:\n${next.text}` : next.text;
-          result = await this._handleMessage(prompt, next.attachments, { convId: id, model: next.model, mode: next.mode, runId: next.id });
+          const prompt = next.resume && !next.resume429 ? `Continue this interrupted request. First reconcile the current files and conversation with work already completed. Do not blindly repeat commands or external side effects. Complete only the remaining work.\n\nOriginal request:\n${next.text}` : next.text;
+          result = await this._handleMessage(prompt, next.attachments, { convId: id, model: next.model, mode: next.mode, runId: next.id, resumeFromCheckpoint: !!next.resume429 });
         } catch (error) {
           failure = error instanceof Error ? error.message : String(error);
           logError("queue.run", error, { conversationId: id });
@@ -220,10 +226,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     return worker;
   }
 
-  private _queueAction(id: string, requestId: string, action: "remove" | "run" | "steer" | "up" | "down" | "edit"): Promise<void> {
+  private _queueAction(id: string, requestId: string, action: "remove" | "run" | "resume429" | "steer" | "up" | "down" | "edit", modelOverride?: string): Promise<void> {
     const previous = this._queueActions.get(id);
     const ready = previous ? previous.catch(() => {}) : this._workflowReady;
-    const actionWork = ready.then(() => this._applyQueueAction(id, requestId, action)).finally(() => {
+    const actionWork = ready.then(() => this._applyQueueAction(id, requestId, action, modelOverride)).finally(() => {
       if (action === "steer") {
         this._sendWorkflowState();
         this._view?.webview.postMessage({ type: "queueSteeringResult", convId: id, requestId,
@@ -266,7 +272,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async _applyQueueAction(id: string, requestId: string, action: "remove" | "run" | "steer" | "up" | "down" | "edit") {
+  private async _applyQueueAction(id: string, requestId: string, action: "remove" | "run" | "resume429" | "steer" | "up" | "down" | "edit", modelOverride?: string) {
     if (this._disposed || this._deleting.has(id)) return;
     const item = this._store.getMetadata(id)?.queue?.find((q) => q.id === requestId);
     if (!item) return;
@@ -275,14 +281,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       const text = item.status === "queued" ? item.text : `Reconcile any already completed work before continuing this interrupted request:\n\n${item.text}`;
       const draft = { text, attachments: item.attachments ?? [] };
       const workspace = this._store.getWorkspaceState();
-      const key = this.featureStore.get().perTabDrafts ? id : "\u0000shared";
+      const key = this.featureStore.get().perTabDrafts !== false ? id : "\u0000shared";
       // Save the draft before removing its source. If the host stops between the
       // writes, recovery retains both instead of losing the user's request.
       await this._store.setWorkspaceState({ drafts: { ...workspace.drafts, [key]: draft } });
       await this._store.updateQueue(id, (queue) => queue.filter((entry) => entry.id !== requestId));
       this._view?.webview.postMessage({ type: "queueDraft", convId: id, draft });
-    } else if (action === "run") {
+    } else if (action === "run" || action === "resume429") {
       if (item.status === "running") return;
+      const is429 = action === "resume429";
+      const nextModel = modelOverride || item.model;
+      if (modelOverride && this._store.has(id)) {
+        await this._store.update(id, { model: modelOverride });
+        await this.settingsManager.saveSettings({ model: modelOverride });
+        if (id === this._activeId) {
+          this._view?.webview.postMessage({ type: "modelSelected", model: modelOverride });
+        }
+      }
       this._queuePaused.add(id);
       const current = this._sessions.get(id);
       const snapshot = this._store.get(id)!;
@@ -292,7 +307,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         // Save the deliberate replacement before aborting: a restart must not
         // offer to replay an action the user explicitly superseded.
         await this._store.update(id, { queue: [
-          { ...item, status: "queued", resume: item.status !== "queued" || item.resume, error: undefined },
+          { ...item, model: nextModel, status: "queued", resume: is429 ? false : (item.status !== "queued" || item.resume), resume429: is429, error: undefined },
           ...(snapshot.queue ?? []).filter(entry => entry.id !== replaced?.id && entry.id !== requestId),
         ], steering: [], steeringQueue: [],
           runEvents: capRunEvents([...snapshot.runEvents ?? [], ...retired.map(entry => ({ runId: entry.id, type: "queue.superseded", at: Date.now() }))]) });
@@ -302,7 +317,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       await this._store.updateQueue(id, (queue) => {
         const selected = queue.find((q) => q.id === requestId);
         if (!selected) return queue;
-        return [{ ...selected, status: "queued", resume: selected.status !== "queued" || selected.resume, error: undefined }, ...queue.filter((q) => q.id !== requestId)];
+        return [{ ...selected, model: nextModel, status: "queued", resume: is429 ? false : (selected.status !== "queued" || selected.resume), resume429: is429, error: undefined }, ...queue.filter((q) => q.id !== requestId)];
       });
       this._queuePaused.delete(id);
     } else if (action === "steer") {
@@ -325,7 +340,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private async _steerMessage(id: string, text: string) {
     if (!text?.trim()) return;
     await this._workflowReady;
-    await this._acceptSteering(id, { id: randomUUID(), text, status: "queued", createdAt: Date.now(), model: this.settingsManager.getSettings().model, mode: this._currentMode });
+    const convMeta = this._store.getMetadata(id);
+    await this._acceptSteering(id, { id: randomUUID(), text, status: "queued", createdAt: Date.now(), model: convMeta?.model ?? this.settingsManager.getSettings().model, mode: convMeta?.mode ?? this._currentMode });
   }
 
   private async _acceptSteering(id: string, item: QueuedMessage, fromQueue = false) {
@@ -552,7 +568,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           await this._store.setWorkspaceState(data.state as Partial<ChatWorkspaceState>);
           break;
         case "queueAction":
-          await this._queueAction(data.convId, data.id, data.action);
+          await this._queueAction(data.convId, data.id, data.action, typeof data.model === "string" && data.model ? data.model : undefined);
           break;
         case "steerMessage":
           await this._steerMessage(data.convId, data.text);
@@ -596,6 +612,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           // the global Auto Continue setting first.
           if (data.always) await this.featureStore.set({ autoContinue: true });
           await this._handleMessage("Continue", undefined, { convId: data.convId, model: data.model, mode: data.mode });
+          break;
+        case "resumeQuotaWait":
+          this._resumeQuotaWait(data.convId ?? this._activeId, {
+            callId: typeof data.callId === "string" ? data.callId : undefined,
+            model: typeof data.model === "string" && data.model ? data.model : undefined,
+          });
+          break;
+        case "resumeCheckpoint":
+          await this._resumeCheckpoint(data.convId ?? this._activeId, {
+            callId: typeof data.callId === "string" ? data.callId : undefined,
+            model: typeof data.model === "string" && data.model ? data.model : undefined,
+          });
           break;
         case "revertToMessage": {
           if (this._activeId && this._store.has(this._activeId)) {
@@ -754,18 +782,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case "answerQuestion":
           this._answerQuestion(data.callId, data.answers || {});
           break;
-        case "setMode":
+        case "setMode": {
           this._currentMode = data.mode;
+          const targetId = typeof data.convId === "string" ? data.convId : this._activeId;
+          if (targetId && this._store.has(targetId)) {
+            await this._store.update(targetId, { mode: data.mode });
+          }
           break;
+        }
         case "setActiveTeams":
           await this.featureStore.set({ activeTeamIds: data.teamIds });
           break;
         case "fetchModels":
           await this._handleFetchModels();
           break;
-        case "selectModel":
-          await this.settingsManager.saveSettings({ model: String(data.model ?? "") });
+        case "selectModel": {
+          const model = String(data.model ?? "");
+          await this.settingsManager.saveSettings({ model });
+          const targetId = typeof data.convId === "string" ? data.convId : this._activeId;
+          if (targetId && this._store.has(targetId)) {
+            await this._store.update(targetId, { model });
+          }
           break;
+        }
         case "saveModelOptions": {
           const features = this.featureStore.get();
           await this.featureStore.set({ modelOptions: { ...features.modelOptions, [this._optionsKeyFor(data.modelId)]: data.options as ModelOption[] } });
@@ -955,6 +994,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case "rules":
           items = await searchRules(query);
           break;
+        case "skills":
+          items = await searchSkills(query);
+          break;
         case "chats": {
           const q = (query || "").toLowerCase();
           items = this._store
@@ -1033,6 +1075,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case "branch_diff":
           await vscode.commands.executeCommand("workbench.view.scm");
           break;
+        case "skill": {
+          // User skills live outside the workspace, so open only a discovered SKILL.md.
+          const skill = await findSkill({ name: "", path: p });
+          if (skill) await vscode.window.showTextDocument(vscode.Uri.file(skill.path), { preview: true });
+          break;
+        }
         default:
           await this._openFile(p);
       }
@@ -1071,23 +1119,44 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private _conversationModelAndMode(conv?: { model?: string; mode?: Mode; turns?: Turn[] }): { selectedModel: string; mode: Mode } {
+    const settings = this.settingsManager.getSettings();
+    let lastTurnModel: string | undefined;
+    let lastTurnMode: Mode | undefined;
+    if (conv?.turns?.length) {
+      for (let i = conv.turns.length - 1; i >= 0; i--) {
+        const t = conv.turns[i];
+        if (t.role === "user") {
+          if (!lastTurnModel && t.model) lastTurnModel = t.model;
+          if (!lastTurnMode && t.mode) lastTurnMode = t.mode as Mode;
+          if (lastTurnModel && lastTurnMode) break;
+        }
+      }
+    }
+    return {
+      selectedModel: conv?.model || lastTurnModel || settings.model,
+      mode: conv?.mode || lastTurnMode || this._currentMode,
+    };
+  }
+
   private async _sendInitialState() {
     await this._workflowReady;
-    const settings = this.settingsManager.getSettings();
     // Resolve active conversation (or leave empty until first message).
     this._activeId = this._store.getActiveId();
     if (this._activeId && !this._store.has(this._activeId)) {
       this._activeId = undefined;
     }
     const active = this._activeId ? this._store.getMetadata(this._activeId) : undefined;
+    const activeTurns = this._turnsFor(this._activeId);
+    const { selectedModel, mode } = this._conversationModelAndMode(active ? { ...active, turns: activeTurns } : undefined);
     const features = this.featureStore.get();
     this._view?.webview.postMessage({
       type: "initialState",
-      mode: this._currentMode,
-      selectedModel: settings.model,
+      mode,
+      selectedModel,
       approvalPolicy: this._approvalPolicy(),
       activeId: this._activeId,
-      turns: this._turnsFor(this._activeId),
+      turns: activeTurns,
       usedTokens: active?.usedTokens,
       allowModelOutputEdits: active?.allowModelOutputEdits === true,
       workspaceRoot: active?.workspaceRoot,
@@ -1104,7 +1173,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         submitWithCtrlEnter: features.submitWithCtrlEnter === true,
         maxTabCount: features.maxTabCount ?? 0,
         completionSound: features.completionSound === true,
-        perTabDrafts: features.perTabDrafts === true,
+        perTabDrafts: features.perTabDrafts !== false,
       },
     });
     this._sendConversations();
@@ -1182,17 +1251,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this._pendingNewConversation = undefined;
     const features = this.featureStore.get();
     this._pendingPersonaId = personaId ?? features.activePersonaId;
-    // Only create a fresh record when the active one already has messages.
-    const active = this._activeId ? this._store.get(this._activeId) : undefined;
-    if (active && !active.workspaceRoot && !active.archivedAt && !active.goal && !active.queue?.length && active.steps.length === 0 && !this._sessions.has(active.id)) {
-      // Active conversation is already empty — reuse it; just set its persona.
-      await this._store.update(active.id, { personaId: this._pendingPersonaId });
-      this._view?.webview.postMessage({ type: "loadConversation", activeId: this._activeId, turns: [], personaId: this._pendingPersonaId });
-      return;
-    }
-    this._activeId = undefined;
-    await this._store.setActiveId(undefined);
-    this._view?.webview.postMessage({ type: "loadConversation", activeId: undefined, turns: [], personaId: this._pendingPersonaId });
+    const settings = this.settingsManager.getSettings();
+    const conv = await this._store.create(this._pendingPersonaId);
+    await this._store.update(conv.id, { model: settings.model, mode: this._currentMode });
+    this._activeId = conv.id;
+    await this._store.setActiveId(conv.id);
+    this._view?.webview.postMessage({
+      type: "loadConversation",
+      activeId: conv.id,
+      turns: [],
+      personaId: this._pendingPersonaId,
+      selectedModel: settings.model,
+      mode: this._currentMode,
+    });
     this._sendConversations();
     this._sendWorkflowState();
     this._sendPendingChanges();
@@ -1219,7 +1290,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this._activeId = id;
     await this._store.setActiveId(id);
     const features = this.featureStore.get();
-    this._view?.webview.postMessage({ type: "loadConversation", activeId: id, turns: this._turnsFor(id), personaId: conv.personaId ?? features.activePersonaId, usedTokens: conv.usedTokens, running: this._sessions.has(id), workspaceRoot: conv.workspaceRoot, allowModelOutputEdits: conv.allowModelOutputEdits === true });
+    const turns = this._turnsFor(id);
+    const { selectedModel, mode } = this._conversationModelAndMode({ ...conv, turns });
+    this._view?.webview.postMessage({
+      type: "loadConversation",
+      activeId: id,
+      turns,
+      personaId: conv.personaId ?? features.activePersonaId,
+      selectedModel,
+      mode,
+      usedTokens: conv.usedTokens,
+      running: this._sessions.has(id),
+      workspaceRoot: conv.workspaceRoot,
+      allowModelOutputEdits: conv.allowModelOutputEdits === true,
+    });
     this._sendConversations();
     this._sendWorkflowState();
     this._sendPendingChanges();
@@ -1285,7 +1369,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         submitWithCtrlEnter: features.submitWithCtrlEnter === true,
         maxTabCount: features.maxTabCount ?? 0,
         completionSound: features.completionSound === true,
-        perTabDrafts: features.perTabDrafts === true,
+        perTabDrafts: features.perTabDrafts !== false,
       },
     });
   }
@@ -1333,6 +1417,111 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         resolve(answers);
       });
       signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private _waitForQuotaReset(session: RunSession, resumeAt: number, signal?: AbortSignal, callId?: string): Promise<"timer" | "manual" | { action: "manual"; model?: string }> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        const err = new Error("cancelled");
+        err.name = "AbortError";
+        reject(err);
+        return;
+      }
+      const waiters = session.quotaWaiters ?? (session.quotaWaiters = new Set());
+      const cleanup = () => {
+        clearTimeout(timer);
+        waiters.delete(onManual);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onManual = (opts?: { callId?: string; model?: string }) => {
+        if (opts?.callId && callId && opts.callId !== callId) return;
+        cleanup();
+        resolve(opts?.model ? { action: "manual", model: opts.model } : "manual");
+      };
+      const onTimer = () => {
+        cleanup();
+        resolve("timer");
+      };
+      const onAbort = () => {
+        cleanup();
+        const err = new Error("cancelled");
+        err.name = "AbortError";
+        reject(err);
+      };
+      const timer = setTimeout(onTimer, Math.max(0, resumeAt - Date.now()));
+      waiters.add(onManual);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private _resumeQuotaWait(convId?: string | null, opts?: { callId?: string; model?: string }): void {
+    const id = convId ?? this._activeId;
+    if (id && opts?.model && !opts?.callId && this._store.has(id)) {
+      void this._store.update(id, { model: opts.model });
+      void this.settingsManager.saveSettings({ model: opts.model });
+      if (id === this._activeId) {
+        this._view?.webview.postMessage({ type: "modelSelected", model: opts.model });
+      }
+    }
+    const session = id ? this._sessions.get(id) : undefined;
+    if (!session?.quotaWaiters) return;
+    for (const resume of [...session.quotaWaiters]) {
+      try { resume(opts); } catch { /* ignore */ }
+    }
+  }
+
+  private async _resumeCheckpoint(convId?: string | null, opts?: { callId?: string; model?: string }): Promise<void> {
+    await this._workflowReady;
+    const id = convId ?? this._activeId;
+    if (!id || this._disposed || this._deleting.has(id) || !this._store.has(id)) return;
+    if (this._sessions.has(id)) {
+      this._resumeQuotaWait(id, opts);
+      return;
+    }
+    const conv = this._store.get(id);
+    if (conv && opts?.model) {
+      if (opts.callId) {
+        const collab = conv.contextState?.agents?.find((a) => a.id === opts.callId);
+        if (collab) collab.model = opts.model;
+        const turns = conv.turns.map((t) => {
+          if (t.role !== "assistant") return t;
+          return {
+            ...t,
+            blocks: t.blocks.map((b) =>
+              b.kind === "tool" && b.callId === opts.callId
+                ? { ...b, input: { ...(b.input || {}), model: stripModelScope(opts.model!) } }
+                : b,
+            ),
+          };
+        });
+        await this._store.update(id, { turns, contextState: conv.contextState });
+      } else {
+        await this._store.update(id, { model: opts.model });
+        await this.settingsManager.saveSettings({ model: opts.model });
+        if (id === this._activeId) {
+          this._view?.webview.postMessage({ type: "modelSelected", model: opts.model });
+        }
+      }
+    }
+    const meta = this._store.getMetadata(id);
+    const queueItem = meta?.queue?.find((q) => q.status === "interrupted" || q.status === "failed");
+    if (queueItem) {
+      await this._queueAction(id, queueItem.id, "resume429", !opts?.callId ? opts?.model : undefined);
+      return;
+    }
+    const freshConv = this._store.get(id);
+    if (!freshConv || freshConv.steps.length === 0) return;
+    const lastUserTurn = [...freshConv.turns].reverse().find((t): t is Extract<Turn, { role: "user" }> => t.role === "user" && !t.steering);
+    const lastUserStep = [...freshConv.steps].reverse().find((s) => s.kind === "user" && !s.synthetic && !s.steering) as { text?: string; attachments?: Attachment[] } | undefined;
+    const prompt = lastUserTurn?.text || lastUserStep?.text || "Continue";
+    const attachments = lastUserTurn?.attachments ?? lastUserStep?.attachments;
+    const { selectedModel, mode } = this._conversationModelAndMode(freshConv);
+    await this._handleMessage(prompt, attachments, {
+      convId: id,
+      model: (!opts?.callId && opts?.model) || selectedModel,
+      mode,
+      resumeFromCheckpoint: true,
     });
   }
 
@@ -1634,6 +1823,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       const available = kind === "antigravity" ? new Set(ids) : undefined;
       for (const m of this.featureStore.allModels()) {
         if (m.providerId ? m.providerId !== `oauth:${kind}` : !kindMatches(m.kind, kind)) continue;
+        if (kind === "antigravity" && !m.providerId && !/^gemini-/i.test(m.id)) continue;
         if (available && !available.has(m.id)) continue;
         const pid = `${providerId}::${m.id}`;
         if (seen.has(pid) || disabledSet.has(m.id) || (!enabledSet.has(m.id) && !catalogIds.has(m.id))) continue;
@@ -1651,6 +1841,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const label = oauth.OAUTH_LABEL[kind];
         const base = kind;
         for (const id of ids) {
+          if (kind === "antigravity" && !/^gemini-/i.test(id)) continue;
           const pid = `${providerId}::${id}`;
           if (seen.has(pid)) continue;
           // Account models are disabled by default unless explicitly enabled,
@@ -1709,8 +1900,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private _modelsForProvider(providerId?: string, oauthKind?: oauth.OAuthKind): string[] {
     const list = this._buildModelList(this._fetchedCache ?? []);
     const wanted = oauthKind ? `__oauth__:${oauthKind}` : providerId;
-    if (!wanted) return [];
-    return [...new Set(list.filter((m) => m.providerId === wanted).map((m) => m.modelId || stripModelScope(m.id)))];
+    const sameProviderBare = wanted
+      ? list.filter((m) => m.providerId === wanted).map((m) => m.modelId || stripModelScope(m.id))
+      : [];
+    const allScoped = list.map((m) => m.id);
+    return [...new Set([...sameProviderBare, ...allScoped])];
   }
 
   /** Auto mode: ask the judge model to choose an enabled model for the task. */
@@ -1871,7 +2065,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private _handleMessage(
     text: string,
     attachments?: Attachment[],
-    edit?: { convId?: string | null; fromIndex?: number; model?: string; mode?: string; revertFiles?: boolean; runId?: string },
+    edit?: { convId?: string | null; fromIndex?: number; model?: string; mode?: string; revertFiles?: boolean; runId?: string; resumeFromCheckpoint?: boolean },
   ) {
     const id = edit?.convId === undefined ? this._activeId : edit.convId;
     return withWorkspaceRoot(id ? this._store.getMetadata(id)?.workspaceRoot : undefined, () => this._handleMessageInWorkspace(text, attachments, edit));
@@ -1880,7 +2074,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private async _handleMessageInWorkspace(
     text: string,
     attachments?: Attachment[],
-    edit?: { convId?: string | null; fromIndex?: number; model?: string; mode?: string; revertFiles?: boolean; runId?: string },
+    edit?: { convId?: string | null; fromIndex?: number; model?: string; mode?: string; revertFiles?: boolean; runId?: string; resumeFromCheckpoint?: boolean },
   ) {
     if (!text.trim() && (!attachments || attachments.length === 0)) {
       vscode.window.showWarningMessage("OpenCursor: Message cannot be empty");
@@ -1890,8 +2084,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // Capture routing before any asynchronous work; switching tabs cannot retarget a send.
     let convId = edit?.convId !== undefined ? edit.convId ?? undefined : this._activeId;
     const selectedAtSubmit = this._activeId;
-    const submittedMode = (edit?.mode ?? this._currentMode) as Mode;
-    const submittedModel = edit?.model ?? this.settingsManager.getSettings().model;
+    const convMetaAtSubmit = convId ? this._store.getMetadata(convId) : undefined;
+    const submittedMode = (edit?.mode ?? convMetaAtSubmit?.mode ?? this._currentMode) as Mode;
+    const submittedModel = edit?.model ?? convMetaAtSubmit?.model ?? this.settingsManager.getSettings().model;
     const queueRunStopped = () => !!edit?.runId && !!convId && (this._disposed || this._queuePaused.has(convId)
       || !this._store.getMetadata(convId)?.queue?.some(item => item.id === edit.runId && item.status === "running"));
     if (convId && (this._deleting.has(convId) || !this._store.has(convId))) return;
@@ -1968,14 +2163,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (queueRunStopped()) return "cancelled";
     const history = storedConversation?.steps ?? [];
     const contextState = storedConversation?.contextState ?? {};
+    const resumeFromCheckpoint = Boolean(edit?.resumeFromCheckpoint && history.length > 0);
+    if (resumeFromCheckpoint && prov.oauthKind) {
+      oauth.clearOAuthCooldowns(prov.oauthKind);
+    }
 
     // Host owns the authoritative UI turns: seed from persisted turns + this
     // user message, then accumulate streamed events below. The webview is just a
     // renderer, so closing/moving/reopening it never loses or breaks the run.
-    const seededTurns: Turn[] = [
-      ...(storedConversation?.turns ?? []),
-      { role: "user" as const, text, attachments: attachments?.length ? (attachments as any) : undefined, model: modelId, mode: submittedMode },
-    ];
+    let seededTurns: Turn[];
+    if (resumeFromCheckpoint && (storedConversation?.turns?.length ?? 0) > 0) {
+      seededTurns = reopenInterruptedWorkForResume(storedConversation!.turns);
+    } else {
+      seededTurns = [
+        ...(storedConversation?.turns ?? []),
+        { role: "user" as const, text, attachments: attachments?.length ? (attachments as any) : undefined, model: modelId, mode: submittedMode },
+      ];
+    }
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const session: RunSession = {
@@ -2270,6 +2474,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         attachments,
         history,
         contextState,
+        resumeFromCheckpoint,
         changeOwner: { conversationId: convId, runId: `run_${Date.now()}_${Math.random().toString(36).slice(2)}`, turnIndex: seededTurns.length - 1 },
         promptCacheKey: convId,
         maxTokens: settings.maxResponseLength > 0 ? settings.maxResponseLength : undefined,
@@ -2292,9 +2497,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         subagentModel: features.subagentModel,
         availableModels: this._modelsForProvider(prov.providerId, prov.oauthKind),
         resolveModelOptions: (childModel) => {
+          if (!childModel.includes("::")) {
+            return {
+              contextTokens: this._contextTokensFor(childModel, modelKind),
+              modelParams: optionsToParams(this.featureStore.optionsFor(childModel, modelKind)),
+              maxTokens: settings.maxResponseLength > 0 ? settings.maxResponseLength : undefined,
+            };
+          }
+          const sep = childModel.indexOf("::");
+          const scopedProvider = childModel.slice(0, sep);
+          const childOauth = (scopedProvider.startsWith("__oauth__:")
+            ? (scopedProvider.slice("__oauth__:".length) as oauth.OAuthKind)
+            : isOAuthProviderKind(scopedProvider)
+              ? (scopedProvider as oauth.OAuthKind)
+              : undefined);
+          const childKind = childOauth ?? features.providers.find((p) => p.id === scopedProvider)?.kind ?? modelKind;
+          const bareChildModel = stripModelScope(childModel);
+          const provDef = features.providers.find((p) => p.id === scopedProvider);
           return {
-            contextTokens: this._contextTokensFor(childModel, modelKind),
-            modelParams: optionsToParams(this.featureStore.optionsFor(childModel, modelKind)),
+            model: bareChildModel,
+            oauthKind: childOauth,
+            apiBaseUrl: provDef?.baseUrl,
+            anthropic: provDef?.kind === "anthropic",
+            contextTokens: this._contextTokensFor(childModel, childKind),
+            modelParams: optionsToParams(this.featureStore.optionsFor(bareChildModel, childKind)),
             maxTokens: settings.maxResponseLength > 0 ? settings.maxResponseLength : undefined,
           };
         },
@@ -2307,6 +2533,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           });
         },
         askUser: (callId, _header, _questions, sig) => this._askUser(session, callId, sig),
+        waitForQuotaReset: (resumeAt, sig, callId) => this._waitForQuotaReset(session, resumeAt, sig, callId),
         onAfterRun: () => runHooks(features.hooks, "afterRun", { prompt: text }),
         onBeforeShell: (command, hookSignal) => runBlockingHooks(features.hooks, "beforeShell", { command }, undefined, hookSignal ?? session.abort.signal),
         onAfterEdit: (path) => runHooks(features.hooks, "afterEdit", { path }),

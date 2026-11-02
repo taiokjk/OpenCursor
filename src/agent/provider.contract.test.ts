@@ -120,6 +120,26 @@ describe("complete provider request contracts", () => {
     expect(JSON.stringify(messages)).toBe(original);
   });
 
+  it("strips prior-turn reasoning_content on deepseek-reasoner while replaying current-turn tool reasoning", async () => {
+    const apiBaseUrl = "https://api.deepseek.com/v1";
+    const model = "deepseek-reasoner";
+    const messages: WireMessage[] = [
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "First answer", chatReasoning: { endpoint: apiBaseUrl, model, content: "Old turn reasoning that should be omitted" } },
+      { role: "user", content: "Second question with tools" },
+      { role: "assistant", content: "Checking file", chatReasoning: { endpoint: apiBaseUrl, model, content: "Current turn tool reasoning" }, tool_calls: [{ id: "call-1", type: "function", function: { name: "Read", arguments: '{"path":"a.ts"}' } }] },
+      { role: "tool", tool_call_id: "call-1", content: "export const a = 1;" },
+    ];
+    await collect({ apiBaseUrl, model, messages, tools: [{ type: "function", function: { name: "Read", description: "Read file", parameters: { type: "object" } } }] });
+    const sent = requests[0].body.messages;
+    expect(JSON.stringify(sent)).not.toContain("Old turn reasoning that should be omitted");
+    expect(sent).toContainEqual(expect.objectContaining({
+      role: "assistant",
+      content: "Checking file",
+      reasoning_content: "Current turn tool reasoning",
+    }));
+  });
+
   it.each([
     ["https://api.deepseek.com/v1", "deepseek-flash", true, "disabled"],
     ["https://api.deepseek.com/v1", "deepseek-flash", false, "enabled"],

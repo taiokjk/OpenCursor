@@ -161,4 +161,42 @@ describe("ContextArchive", () => {
     const id = archive.store("x".repeat(10000), "\u0000".repeat(1000));
     expect(archive.read({ id }).length).toBeLessThanOrEqual(6000);
   });
+
+  it("microcompacts medium-sized stale tool outputs and oversized chatReasoning from earlier user turns while keeping current-turn outputs verbatim", () => {
+    const archive = new ContextArchive();
+    const staleOutput = "stale line\n".repeat(450); // ~4950 chars (> 3500, < 8000)
+    const currentOutput = "current line\n".repeat(450); // ~5850 chars (< 8000)
+    const oldReasoning = "old reasoning ".repeat(700); // ~9800 chars (> 8000)
+    const currentReasoning = "current reasoning ".repeat(700);
+    const steps: Step[] = [
+      { kind: "user", text: "Turn 1" },
+      { kind: "assistant", text: "Checking", calls: [{ id: "c1", name: "Grep", arguments: '{"pattern":"foo"}' }], chatReasoning: { endpoint: "https://api.deepseek.com/v1", model: "deepseek-flash", content: oldReasoning } },
+      { kind: "tool-result", callId: "c1", name: "Grep", status: "completed", output: staleOutput },
+      { kind: "user", text: "Turn 2" },
+      { kind: "assistant", text: "Checking again", calls: [{ id: "c2", name: "Grep", arguments: '{"pattern":"bar"}' }], chatReasoning: { endpoint: "https://api.deepseek.com/v1", model: "deepseek-flash", content: currentReasoning } },
+      { kind: "tool-result", callId: "c2", name: "Grep", status: "completed", output: currentOutput },
+    ];
+    const prepared = archive.prepareSteps(steps);
+    expect(prepared[2].kind === "tool-result" && prepared[2].output.length).toBeLessThanOrEqual(1800);
+    expect(prepared[2].kind === "tool-result" && prepared[2].output).toContain("ReadContext");
+    expect(prepared[1].kind === "assistant" && prepared[1].chatReasoning).toBeUndefined();
+    expect(prepared[5].kind === "tool-result" && prepared[5].output).toBe(currentOutput);
+    expect(prepared[4].kind === "assistant" && prepared[4].chatReasoning?.content).toBe(currentReasoning);
+  });
+
+  it("deduplicates earlier identical Read outputs for the same file and arguments while keeping the latest Read verbatim", () => {
+    const archive = new ContextArchive();
+    const fileContent = "export function calculateTotal(items: number[]) {\n  return items.reduce((a, b) => a + b, 0);\n}\n".repeat(10);
+    const steps: Step[] = [
+      { kind: "user", text: "Check app.ts" },
+      { kind: "assistant", text: "", calls: [{ id: "read-1", name: "Read", arguments: '{"path":"src/app.ts"}' }] },
+      { kind: "tool-result", callId: "read-1", name: "Read", status: "completed", output: fileContent },
+      { kind: "assistant", text: "", calls: [{ id: "read-2", name: "Read", arguments: '{"path":"src/app.ts"}' }] },
+      { kind: "tool-result", callId: "read-2", name: "Read", status: "completed", output: fileContent },
+    ];
+    const prepared = archive.prepareSteps(steps);
+    expect(prepared[2].kind === "tool-result" && prepared[2].output).toContain("Duplicate Read output identical to later call read-2");
+    expect(prepared[2].kind === "tool-result" && prepared[2].output).toContain("ReadContext");
+    expect(prepared[4].kind === "tool-result" && prepared[4].output).toBe(fileContent);
+  });
 });

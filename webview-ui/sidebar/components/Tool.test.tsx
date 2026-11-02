@@ -122,6 +122,17 @@ describe("Tool keyboard interaction", () => {
     expect(onOpen).toHaveBeenCalledWith("task-1");
   });
 
+  it("shows Stopped status and a Resume button on a cancelled subagent card that dispatches resumeCheckpoint", () => {
+    const onOpen = vi.fn();
+    act(() => root.render(<ToolCard onOpenSubagent={onOpen} block={{ kind: "tool", name: "Task", callId: "task-cancelled", status: "error", subStatus: "cancelled", result: "(cancelled)", input: { description: "Inspect routing" } }} />));
+    expect(container.querySelector(".sub-status")?.textContent).toBe("Stopped");
+    const resumeBtn = container.querySelector<HTMLButtonElement>(".sub-resume-btn")!;
+    expect(resumeBtn).not.toBeNull();
+    act(() => resumeBtn.click());
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "resumeCheckpoint", callId: "task-cancelled" });
+  });
+
   it("expands and collapses a plan with the keyboard", () => {
     act(() => root.render(<ToolCard block={{ kind: "tool", name: "WritePlan", callId: "plan-1", status: "completed", input: { title: "Routing plan", content: "Inspect the route handlers." } }} />));
     const header = container.querySelector<HTMLElement>(".plan-header")!;

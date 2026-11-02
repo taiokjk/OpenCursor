@@ -20,6 +20,8 @@ describe("official compatible-provider option contracts", () => {
     ["https://api.x.ai/v1", "grok-4.7", "xai"],
     ["https://api.deepseek.com/v1/", "deepseek-flash", "deepseek"],
     ["https://api.deepseek.com", "deepseek-v4-pro", "deepseek"],
+    ["https://api.deepseek.com/v1", "deepseek-reasoner", "deepseek"],
+    ["https://api.deepseek.com/v1", "deepseek-chat", "deepseek"],
     ["https://api.moonshot.ai/v1", "kimi-k3", "moonshot"],
     ["https://api.z.ai/api/paas/v4", "glm-5.3-flashx", "z-ai"],
     ["https://api.z.ai/api/coding/paas/v4/", "glm-5.3", "z-ai"],

@@ -77,14 +77,16 @@ export interface ModelDef {
   providerName?: string;
   /** Provider id this model is served by. */
   providerId?: string;
+  /** Bare model id without provider prefix. */
+  modelId?: string;
 }
 
 export type MentionKind =
   | "file" | "folder" | "code" | "doc" | "git" | "composer"
-  | "terminal" | "rule" | "branch_diff" | "link";
+  | "terminal" | "rule" | "branch_diff" | "link" | "skill";
 
-/** Categories shown in the top-level @ menu. */
-export type MentionCategory = "files" | "code" | "docs" | "git" | "terminals" | "rules" | "chats" | "branch" | "link";
+/** Categories shown in the top-level @ menu; "skills" is reached by typing `/`. */
+export type MentionCategory = "files" | "code" | "docs" | "git" | "terminals" | "rules" | "chats" | "branch" | "link" | "skills";
 
 export interface MentionItem {
   path: string;
@@ -116,7 +118,7 @@ export type InMessage =
   | { type: "modelsFetched"; models: string[]; modelList?: ModelDef[] }
   | { type: "modelSelected"; model: string }
   | { type: "conversations"; list: ConversationSummary[]; activeId?: string; runningConvIds?: string[] }
-  | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; usedTokens?: number; running?: boolean; workspaceRoot?: string; allowModelOutputEdits?: boolean }
+  | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; selectedModel?: string; mode?: Mode; usedTokens?: number; running?: boolean; workspaceRoot?: string; allowModelOutputEdits?: boolean }
   | { type: "modelOutputEdited"; convId: string; turns: Turn[] }
   | { type: "error"; convId?: string; message: string }
   | { type: "attachmentsPicked"; attachments: Attachment[] }
@@ -157,7 +159,7 @@ export type OutMessage =
   | { type: "ready" }
   | { type: "sendMessage"; convId?: string | null; text: string; attachments?: Attachment[]; fromIndex?: number; model?: string; mode?: Mode; revertFiles?: boolean; requestId?: string }
   | { type: "updateChatWorkspace"; state: Partial<ChatWorkspaceState> }
-  | { type: "queueAction"; convId: string; id: string; action: "remove" | "run" | "steer" | "up" | "down" | "edit" }
+  | { type: "queueAction"; convId: string; id: string; action: "remove" | "run" | "resume429" | "steer" | "up" | "down" | "edit"; model?: string }
   | { type: "steerMessage"; convId: string; text: string }
   | { type: "forkConversation"; id: string }
   | { type: "archiveConversation"; id: string; archived: boolean }
@@ -167,6 +169,8 @@ export type OutMessage =
   | { type: "startReview"; target: ReviewTarget }
   | { type: "createWorktreeConversation"; title?: string }
   | { type: "continueRun"; always?: boolean }
+  | { type: "resumeQuotaWait"; convId?: string; callId?: string; model?: string }
+  | { type: "resumeCheckpoint"; convId?: string; callId?: string; model?: string }
   | { type: "revertToMessage"; index: number; revertFiles?: boolean }
   | { type: "browseAttachments" }
   | { type: "openSettings"; section?: string }
@@ -183,10 +187,10 @@ export type OutMessage =
   | { type: "cancelSubagent"; callId: string; reason?: "timeout" | "user" }
   | { type: "answerQuestion"; callId: string; answers: Record<string, string[]> }
   | { type: "resolveApproval"; requestId: string; approve?: boolean; pattern?: string; addPattern?: "allow" | "deny"; setMode?: ApprovalMode }
-  | { type: "setMode"; mode: Mode }
+  | { type: "setMode"; mode: Mode; convId?: string }
   | { type: "setActiveTeams"; teamIds: string[] }
   | { type: "fetchModels" }
-  | { type: "selectModel"; model: string }
+  | { type: "selectModel"; model: string; convId?: string }
   | { type: "saveModelOptions"; modelId: string; options: ModelOption[] }
   | { type: "resetModelOptions"; modelId: string }
   | { type: "searchFiles"; query: string; requestId: number }

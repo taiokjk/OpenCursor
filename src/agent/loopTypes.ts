@@ -40,6 +40,8 @@ export interface RunAgentOptions {
 	history: Step[];
 	/** Mutable working-memory checkpoint; persist beside the full transcript. */
 	contextState?: ContextState;
+	/** Continue directly from the existing `history` checkpoint without appending a new user step (429 resume path). */
+	resumeFromCheckpoint?: boolean;
 	changeOwner?: import("../stores/pendingChanges").ChangeOwner;
 	/** Stable conversation key for transports that support prompt cache routing. */
 	promptCacheKey?: string;
@@ -77,12 +79,16 @@ export interface RunAgentOptions {
 	subagentModel?: string;
 	/** Model ids selectable for this run's provider; a Task model outside this list is ignored. */
 	availableModels?: string[];
-	/** Resolve options for a different child/summary model; never inherit incompatible reasoning controls. */
-	resolveModelOptions?: (model: string) => Pick<RunAgentOptions, "contextTokens" | "maxTokens" | "modelParams" | "sampling">;
+	/** Resolve options and provider routing for a different child/summary/resumed model. */
+	resolveModelOptions?: (model: string) =>
+		| Partial<Pick<RunAgentOptions, "model" | "apiBaseUrl" | "apiKey" | "apiKeyPool" | "anthropic" | "oauthKind" | "contextTokens" | "maxTokens" | "modelParams" | "sampling">>
+		| Promise<Partial<Pick<RunAgentOptions, "model" | "apiBaseUrl" | "apiKey" | "apiKeyPool" | "anthropic" | "oauthKind" | "contextTokens" | "maxTokens" | "modelParams" | "sampling">>>;
 	/** Called when a subagent starts, so the UI can offer a per-subagent stop. */
 	registerSubagentAbort?: (callId: string, abort: () => void) => void;
 	/** Ask the user clarifying questions via the chat UI (ask_question tool). */
 	askUser?: (callId: string, header: string | undefined, questions: AskQuestionItem[], signal?: AbortSignal) => Promise<Record<string, string[]>>;
+	/** Pause in-place on 429 quota exhaustion until `resumeAt` or manual user resume (optionally switching model). */
+	waitForQuotaReset?: (resumeAt: number, signal: AbortSignal, callId?: string) => Promise<"timer" | "manual" | { action: "manual"; model?: string }>;
 	onAfterRun?: () => void;
 	/** Blocking before-shell hook: resolves with a block reason to veto the command. */
 	onBeforeShell?: (command: string, signal?: AbortSignal) => Promise<string | undefined> | void;

@@ -97,6 +97,7 @@ export const BUILTIN_TEAM_SUBAGENTS: SubagentDef[] = [
 		name: "Product Manager",
 		description: "Turns a raw request into scope, user stories and testable acceptance criteria. Read-only.",
 		readonly: true,
+		model: "__oauth__:antigravity::gemini-4-argon-medium",
 		prompt: member(
 			"Product Manager",
 			`
@@ -169,6 +170,7 @@ Precise enough that an architect and an engineer can act with no further convers
 		name: "Explorer",
 		description: "Maps the codebase and reports exactly where and how a change must be made. Read-only.",
 		readonly: true,
+		model: "__oauth__:antigravity::gemini-3.8-flash-high",
 		prompt: member(
 			"Codebase Explorer",
 			`
@@ -238,6 +240,7 @@ Include short verbatim snippets only where they save the reader a lookup. No fil
 		name: "Architect",
 		description: "Designs the technical approach, boundaries, data model and an ordered implementation plan. Read-only.",
 		readonly: true,
+		model: "__oauth__:claude-code::claude-opus-5-5",
 		prompt: member(
 			"Software Architect",
 			`
@@ -318,6 +321,7 @@ Unambiguous enough that two engineers working separately produce compatible code
 		name: "UI/UX Designer",
 		description: "Designs the flows, layout, states, copy and accessibility of the interface, and implements the visual layer.",
 		readonly: false,
+		model: "__oauth__:antigravity::gemini-4-argon-high",
 		prompt: member(
 			"UI/UX Designer",
 			`
@@ -390,6 +394,7 @@ The implemented markup and styling, plus a report covering:
 		name: "Frontend Developer",
 		description: "Implements client-side components, state, data flow and interactions.",
 		readonly: false,
+		model: "__oauth__:claude-code::claude-sonnet-5-5",
 		prompt: member(
 			"Frontend Developer",
 			`
@@ -463,6 +468,7 @@ Working client-side code, plus a report listing:
 		name: "Backend Developer",
 		description: "Implements server-side logic, APIs, persistence and integrations.",
 		readonly: false,
+		model: "__oauth__:claude-code::claude-sonnet-5-5",
 		prompt: member(
 			"Backend Developer",
 			`
@@ -537,6 +543,7 @@ Working server-side code, plus a report stating:
 		name: "Database Engineer",
 		description: "Designs schemas, migrations, indexes and query access paths.",
 		readonly: false,
+		model: "__oauth__:claude-code::claude-sonnet-5-5",
 		prompt: member(
 			"Database Engineer",
 			`
@@ -607,6 +614,7 @@ The migration and schema changes, plus a report with:
 		name: "DevOps Engineer",
 		description: "Owns build, packaging, dependencies, CI/CD, configuration and release.",
 		readonly: false,
+		model: "__oauth__:antigravity::gemini-4-argon-medium",
 		prompt: member(
 			"DevOps Engineer",
 			`
@@ -678,6 +686,7 @@ The build, script, pipeline, and config changes, plus a report listing:
 		name: "QA Engineer",
 		description: "Writes tests and verifies the implementation against the acceptance criteria.",
 		readonly: false,
+		model: "__oauth__:antigravity::gemini-4-argon-medium",
 		prompt: member(
 			"QA Engineer",
 			`
@@ -749,6 +758,7 @@ New or extended tests that pass, plus a report with:
 		name: "Code Reviewer",
 		description: "Reviews the change for correctness, security and maintainability, defect-first. Read-only.",
 		readonly: true,
+		model: "__oauth__:claude-code::claude-sonnet-5-5",
 		prompt: member(
 			"Code Reviewer",
 			`
@@ -817,6 +827,7 @@ If there are no blockers, say so plainly.
 		name: "Security Engineer",
 		description: "Audits the change for exploitable security and privacy risk. Read-only.",
 		readonly: true,
+		model: "__oauth__:claude-code::claude-sonnet-5-5",
 		prompt: member(
 			"Security Engineer",
 			`
@@ -885,6 +896,7 @@ State plainly when you found nothing exploitable.
 		name: "Threat Modeler",
 		description: "Maps trust boundaries, assets and STRIDE threats before implementation or audit. Read-only.",
 		readonly: true,
+		model: "__oauth__:antigravity::gemini-4-argon-high",
 		prompt: member(
 			"Threat Modeler",
 			`
@@ -956,6 +968,7 @@ Concrete enough that a security engineer can hunt and a developer can harden wit
 		name: "Technical Writer",
 		description: "Writes and updates docs, READMEs, references and changelog entries.",
 		readonly: false,
+		model: "__oauth__:antigravity::gemini-3.8-flash-medium",
 		prompt: member(
 			"Technical Writer",
 			`

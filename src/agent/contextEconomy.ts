@@ -137,13 +137,13 @@ export const COMPACT_MIN_GAIN_FRAC = 0.15;
 /** Minimum steps between two compactions, so a run can't summarize in a loop. */
 export const COMPACT_COOLDOWN_STEPS = 8;
 
-/** Safe boundary: the model just completed a subtask instead of being mid-tool loop. */
+/** Safe boundary: the model just completed a subtask or the user started a new turn. */
 export function isCompactionBoundary(steps: Step[]): boolean {
   const last = steps[steps.length - 1];
   if (!last) return false;
   if (last.kind === "assistant" && !!last.text.trim() && !last.calls.length) return true;
-  // Loop-injected messages (subagent reports, nudges) land between turns, which
-  // is exactly a safe place to compact.
-  if (last.kind === "user") return last.synthetic === true;
+  // Loop-injected notes and new user turns land between completed turns, which
+  // is a safe place to compact before sending the next step.
+  if (last.kind === "user") return !last.steering;
   return false;
 }

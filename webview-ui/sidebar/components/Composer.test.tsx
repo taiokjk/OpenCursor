@@ -132,6 +132,40 @@ it("removes mentions with Enter and Space without submitting, preserving text an
   expect(lastDraft().text).not.toContain("<attached");
 });
 
+function typeAtEnd(initialText: string) {
+  act(() => root.render(<Composer {...props} initialText={initialText} />));
+  const walker = document.createTreeWalker(editor(), NodeFilter.SHOW_TEXT);
+  let last: Text | null = null;
+  while (walker.nextNode()) last = walker.currentNode as Text;
+  act(() => {
+    editor().focus();
+    const range = document.createRange();
+    range.setStart(last!, last!.length);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    editor().dispatchEvent(new InputEvent("input", { bubbles: true }));
+  });
+}
+const searches = () => vi.mocked(vscode.postMessage).mock.calls.map(([m]) => m as { type: string; kind?: string; query?: string; requestId?: number });
+
+it("opens the skills picker for a word-start slash and inserts the picked skill as a mention", () => {
+  typeAtEnd("Please /brain");
+  const request = searches().find(m => m.type === "searchMentions");
+  expect(request).toMatchObject({ kind: "skills", query: "brain" });
+  expect(container.querySelector(".mention-head")?.textContent).toContain("Skills");
+  const item = { kind: "skill", name: "brainstorming", path: "/home/u/.opencursor/skills/brainstorming/SKILL.md", detail: "Explore ideas" };
+  act(() => window.dispatchEvent(new MessageEvent("message", { data: { type: "mentionSearchResults", requestId: request!.requestId, kind: "skills", items: [item] } })));
+  key(editor(), "Enter");
+  expect(submit).not.toHaveBeenCalled();
+  expect(lastDraft().text).toContain('<attached type="skill" title="brainstorming" content="/home/u/.opencursor/skills/brainstorming/SKILL.md" />');
+  expect(lastDraft().text).not.toContain("/brain ");
+});
+
+it.each(["src/app", "@src/app", "a /b c"])("does not open the skills picker for %s", text => {
+  typeAtEnd(text);
+  expect(searches().some(m => m.type === "searchMentions" && m.kind === "skills")).toBe(false);
+});
+
 it("retains removal after tab draft restoration and document undo/redo", () => {
   act(() => root.render(<Composer {...props} focusKey="first" />));
   act(() => root.render(<Composer {...props} focusKey="second" tabDraft={{ text: mention, attachments: [] }} />));

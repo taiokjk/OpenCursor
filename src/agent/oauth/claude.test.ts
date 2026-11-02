@@ -145,11 +145,14 @@ describe("Claude OAuth request protocol", () => {
     expect(userId.account_uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(userId.session_id).toBe("session-fixture");
     expect(new Headers(request.init.headers).get("x-claude-code-session-id")).toBe("session-fixture");
-    const again = JSON.parse(JSON.parse(String(buildClaudeMessagesRequest(token, {
+    const againRequest = buildClaudeMessagesRequest(token, {
       model: "claude-sonnet-4-6", messages: [{ role: "user", content: "hi" }], sessionId: "session-fixture",
       signal: new AbortController().signal,
-    }).init.body)).metadata.user_id);
+    });
+    const againBody = JSON.parse(String(againRequest.init.body));
+    const again = JSON.parse(againBody.metadata.user_id);
     expect(again).toEqual(userId);
+    expect(againBody.system[0].text).toBe(body.system[0].text);
   });
 
   it.each([

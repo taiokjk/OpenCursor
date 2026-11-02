@@ -276,6 +276,7 @@ export interface FeatureConfig {
   teams: TeamDef[];
   activeTeamIds: string[];
   subagentModel: string;
+  subagentModelsV2?: boolean;
   autoJudgeModel: string;
   hooks: HookDef[];
   enabledModels: string[];
@@ -375,7 +376,8 @@ export const EMPTY_FEATURES: FeatureConfig = {
   subagents: [],
   teams: [],
   activeTeamIds: [],
-  subagentModel: "",
+  subagentModel: "__oauth__:antigravity::gemini-3.8-flash-high",
+  subagentModelsV2: true,
   autoJudgeModel: "",
   hooks: [],
   enabledModels: [],
@@ -394,7 +396,7 @@ export const EMPTY_FEATURES: FeatureConfig = {
   motion: "full",
   submitWithCtrlEnter: false,
   maxTabCount: 0,
-  perTabDrafts: false,
+  perTabDrafts: true,
   maxAgentSteps: 50,
   toolTimeoutsSec: {},
   autoContinue: false,

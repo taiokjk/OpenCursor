@@ -205,7 +205,7 @@
 		"test": "vscode-test",
 		"test:unit": "vitest run --exclude src/agent/tools/browser.test.ts",
 		"test:browser": "vitest run src/agent/tools/browser.test.ts --maxWorkers=1 --minWorkers=1",
-		"vsix": "pnpm run package && pnpm dlx @vscode/vsce package --no-dependencies",
+		"vsix": "pnpm run package && pnpm dlx @vscode/vsce@3 package --no-dependencies",
 		"runtime:manifest": "node scripts/generate-runtime-manifest.cjs",
 		"runtime:check": "node scripts/generate-runtime-manifest.cjs --check",
 		"test:runtime": "node scripts/runtime-smoke.cjs",
