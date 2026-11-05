@@ -106,7 +106,7 @@ vi.mock("../integrations/mcpClient", async () => ({
 }));
 vi.mock("../logging", () => ({ logError: vi.fn() }));
 
-import { runAgent, resolveCompactionThinkingLevel } from "./loop";
+import { runAgent, resolveCompactionThinkingLevel, compactionReasoning } from "./loop";
 import { writePlanTool } from "./tools/agent";
 import { TOOLS } from "./tools";
 import * as cursorContext from "../context/cursorContext";
@@ -796,7 +796,7 @@ describe("runAgent context consumption", () => {
 		expect(events.filter((event) => event.type === "compaction")).toEqual([
 			{ type: "compaction", status: "running", model: "test-model", thinkingLevel: "disabled" },
 			summaryFails
-				? { type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled" }
+				? { type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: "Summary provider temporarily unavailable" }
 				: { type: "compaction", status: "done", summary, model: "test-model", thinkingLevel: "disabled" },
 		]);
 		if (!summaryFails) expect(events).toContainEqual(expect.objectContaining({ type: "usage", promptTokens: 750, completionTokens: 60 }));
@@ -816,6 +816,76 @@ describe("runAgent context consumption", () => {
 		], { prompt: "Continue with the recovered finding.", ...restored, contextTokens: 1_000_000 });
 		expectFinished(next.events, "The context is still available.", 1);
 		expect(next.events.filter((event) => event.type === "compaction")).toEqual([]);
+	});
+
+	it("pauses on a failed summary and retries with the user's model and thinking level", async () => {
+		const history = olderReadHistory("Inspect dependency initialization.", "DETAIL_FOR_RETRY");
+		const summary = "Recovered summary from the retry.";
+		const decisions: (string | undefined)[] = [];
+		const { events } = await run([
+			() => { throw new Error("400 thinking level minimal is not supported"); },
+			answer(summary),
+			answer("Continued after retry."),
+		], {
+			prompt: "Continue.", history, contextTokens: 12_000, maxTokens: 1024,
+			availableModels: ["test-model", "__oauth__:antigravity::gemini-3.8-flash-high"],
+			resolveModelOptions: (next) => ({ model: next.slice(next.indexOf("::") + 2), oauthKind: "antigravity", contextTokens: 1_000_000 }),
+			waitForCompactionDecision: async (_signal, callId) => {
+				decisions.push(callId);
+				return { action: "retry", model: "__oauth__:antigravity::gemini-3.8-flash-high", thinkingLevel: "high" };
+			},
+		});
+		expect(decisions).toEqual([undefined]);
+		expect(events.filter((event) => event.type === "compaction")).toEqual([
+			{ type: "compaction", status: "running", model: "test-model", thinkingLevel: "disabled" },
+			{ type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: "400 thinking level minimal is not supported", paused: true },
+			{ type: "compaction", status: "running", model: "gemini-3.8-flash-high", thinkingLevel: "high" },
+			{ type: "compaction", status: "done", summary, model: "gemini-3.8-flash-high", thinkingLevel: "high" },
+		]);
+		expect(fixture.requests[1].model).toBe("gemini-3.8-flash-high");
+		expect(fixture.requests[1].modelParams).toMatchObject({ reasoningEffort: "high" });
+		expect(fixture.requests[1].modelParams?.thinking).toBeUndefined();
+		expectFinished(events, "Continued after retry.", 3);
+	});
+
+	it("trims without a summary when the user chooses to continue after a failure", async () => {
+		const history = olderReadHistory("Inspect dependency initialization.", "DETAIL_FOR_TRIM");
+		const { events } = await run([
+			() => { throw new Error("summary unavailable"); },
+			answer("Continued with trimming."),
+		], {
+			prompt: "Continue.", history, contextTokens: 12_000, maxTokens: 1024,
+			waitForCompactionDecision: async () => ({ action: "trim" }),
+		});
+		expect(events.filter((event) => event.type === "compaction")).toEqual([
+			{ type: "compaction", status: "running", model: "test-model", thinkingLevel: "disabled" },
+			{ type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: "summary unavailable", paused: true },
+			{ type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: "summary unavailable" },
+		]);
+		expectFinished(events, "Continued with trimming.", 2);
+	});
+
+	it("stays paused with the error when the chosen retry model cannot be resolved", async () => {
+		const history = olderReadHistory("Inspect dependency initialization.", "DETAIL_FOR_BAD_MODEL");
+		const decisions = [
+			{ action: "retry" as const, model: "broken::model" },
+			{ action: "trim" as const },
+		];
+		const { events } = await run([
+			() => { throw new Error("first failure"); },
+			answer("Continued."),
+		], {
+			prompt: "Continue.", history, contextTokens: 12_000, maxTokens: 1024,
+			resolveModelOptions: (next) => { if (next === "broken::model") throw new Error("provider removed"); return {}; },
+			waitForCompactionDecision: async () => decisions.shift()!,
+		});
+		const failures = events.filter((event) => event.type === "compaction" && event.status === "failed");
+		expect(failures.map((event) => event.type === "compaction" && event.error)).toEqual([
+			"first failure",
+			"Could not use the selected model: provider removed",
+			"Could not use the selected model: provider removed",
+		]);
+		expectFinished(events, "Continued.", 2);
 	});
 
 	it("reuses a serialized summary and todo state on the next run without another paid summary", async () => {
@@ -1801,6 +1871,10 @@ describe("resolveCompactionThinkingLevel", () => {
     expect(resolveCompactionThinkingLevel("gemini-3-flash", "antigravity")).toBe("minimal");
   });
 
+  it("resolves low for gemini-3.8 flash variants, whose floor is low", () => {
+    expect(resolveCompactionThinkingLevel("gemini-3.8-flash-high", "antigravity")).toBe("low");
+  });
+
   it("resolves disabled for models where thinking can be turned off", () => {
     expect(resolveCompactionThinkingLevel("claude-sonnet-4-6", "claude-code")).toBe("disabled");
   });
@@ -1811,5 +1885,18 @@ describe("resolveCompactionThinkingLevel", () => {
 
   it("resolves disabled for non-reasoning models", () => {
     expect(resolveCompactionThinkingLevel("gpt-4o", "openai")).toBe("disabled");
+  });
+});
+
+describe("compactionReasoning", () => {
+  it("sends the displayed level as reasoning effort instead of forcing thinking off", () => {
+    expect(compactionReasoning("minimal", { thinking: "adaptive", maxContext: "200k" })).toEqual({
+      modelParams: { thinking: undefined, reasoningEffort: "minimal", maxContext: "200k" },
+      thinkingLevel: "minimal",
+    });
+  });
+
+  it("disables thinking only when the level is disabled", () => {
+    expect(compactionReasoning("none")).toEqual({ modelParams: { thinking: "disabled", reasoningEffort: "low" }, thinkingLevel: "disabled" });
   });
 });

@@ -523,6 +523,7 @@ function shortModelName(model: unknown): string {
 function subagentActivity(blocks?: AssistantBlock[]): string {
   const last = blocks && blocks.length ? blocks[blocks.length - 1] : undefined;
   if (!last) return "Starting…";
+  if (last.kind === "compaction" && last.paused) return "Summary failed — waiting for your decision…";
   if (last.kind === "thinking") return "Planning next move…";
   if (last.kind === "text") return "Generating…";
   if (last.kind === "tool") {

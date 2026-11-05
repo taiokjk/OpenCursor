@@ -11,6 +11,7 @@ import { streamChat, SamplingParams, ModelParams } from "./provider";
 import { responseTokenReservation } from "./providerLimits";
 import { clearOAuthCooldowns, getOAuthQuotaLimits, type OAuthKind } from "./oauth";
 import { getThinkingLevels } from "./oauth/protocols/providers/thinkingLevels.js";
+import { geminiRejectsMinimalThinking } from "./provider/google";
 import { DEFAULT_QUOTA_BACKOFF_MS, MAX_QUOTA_RETRIES, resolveQuotaResumeAt, waitUntilQuotaResumeAt } from "./quotaRetry";
 import { OAUTH_PROVIDER_DEFINITIONS, supportsOAuthTools } from "../shared/oauthProviders";
 import { noteUserActivity } from "./semanticIndex";
@@ -330,12 +331,22 @@ export function resolveCompactionThinkingLevel(model: string, oauthKind?: string
 		return "disabled";
 	}
 	if (provider === "antigravity" || /gemini/i.test(model)) {
-		return supported.includes("minimal") ? "minimal" : (supported.includes("low") ? "low" : supported[0]);
+		const minimal = supported.includes("minimal") && !geminiRejectsMinimalThinking(model);
+		return minimal ? "minimal" : (supported.includes("low") ? "low" : supported[0]);
 	}
 	if (supported.includes("none")) {
 		return "disabled";
 	}
 	return supported.includes("low") ? "low" : (supported[0] ?? "disabled");
+}
+
+/** Summary request params for `level`. The displayed label is derived here too,
+ *  so the UI always reports the level that is actually sent. */
+export function compactionReasoning(level: string, base?: ModelParams): { modelParams: ModelParams; thinkingLevel: string } {
+	if (["disabled", "none", "off"].includes(level)) {
+		return { modelParams: { ...base, thinking: "disabled", reasoningEffort: "low" }, thinkingLevel: "disabled" };
+	}
+	return { modelParams: { ...base, thinking: undefined, reasoningEffort: level }, thinkingLevel: level };
 }
 
 export async function runAgent(opts: RunAgentOptions): Promise<void> {
@@ -722,6 +733,9 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 						return res;
 					}
 					: undefined,
+				waitForCompactionDecision: opts.waitForCompactionDecision
+					? (sig) => opts.waitForCompactionDecision!(sig, callId)
+					: undefined,
 				isSubagent: true,
 				inheritedContext,
 				// Nested Task disabled; child still needs hooks for compaction etc.
@@ -1056,13 +1070,13 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			return true;
 		};
 
-		const resolveSummaryTarget = async () => {
+		const resolveSummaryTarget = async (override: { model?: string; thinkingLevel?: string } = {}) => {
 			const autoFastModel = !subagentModel && availableModels?.length && /^claude-opus-/i.test(model)
 				? availableModels.find(m => /^claude-(?:sonnet-4-6|sonnet-5|haiku-5|haiku-4-5)/i.test(m))
 				: undefined;
-			const summaryModel = subagentModel && (!availableModels?.length || availableModels.some(m => m.toLowerCase() === subagentModel.toLowerCase()))
+			const summaryModel = override.model || (subagentModel && (!availableModels?.length || availableModels.some(m => m.toLowerCase() === subagentModel.toLowerCase()))
 				? subagentModel
-				: autoFastModel ?? model;
+				: autoFastModel ?? model);
 			const summaryConfig = summaryModel === model ? { contextTokens, modelParams } : (await opts.resolveModelOptions?.(summaryModel)) ?? {};
 			const summaryBareModel = summaryConfig.model ?? (summaryModel.includes("::") ? summaryModel.slice(summaryModel.indexOf("::") + 2) : summaryModel);
 			const summaryBaseUrl = summaryConfig.apiBaseUrl !== undefined ? summaryConfig.apiBaseUrl : apiBaseUrl;
@@ -1070,10 +1084,10 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			const summaryApiKeyPool = "apiKeyPool" in summaryConfig ? summaryConfig.apiKeyPool : apiKeyPool;
 			const summaryAnthropic = summaryConfig.anthropic !== undefined ? summaryConfig.anthropic : anthropic;
 			const summaryOAuthKind = "oauthKind" in summaryConfig ? summaryConfig.oauthKind : oauthKind;
-			const summaryModelParams = summaryConfig.modelParams
-				? { ...summaryConfig.modelParams, thinking: "disabled" as const, reasoningEffort: "low" as const }
-				: { thinking: "disabled" as const, reasoningEffort: "low" as const };
-			const summaryThinkingLevel = resolveCompactionThinkingLevel(summaryBareModel, summaryOAuthKind);
+			const { modelParams: summaryModelParams, thinkingLevel: summaryThinkingLevel } = compactionReasoning(
+				override.thinkingLevel || resolveCompactionThinkingLevel(summaryBareModel, summaryOAuthKind),
+				summaryConfig.modelParams,
+			);
 			return {
 				summaryModel,
 				summaryConfig,
@@ -1102,6 +1116,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				: 24000;
 			const transcript = clip(stepsToTranscript(steps), Math.max(256, Math.min(24000, summaryBudget) * 4));
 			let text = "";
+			let summaryFinish = "";
 			for await (const ev of streamChat({
 				apiBaseUrl: target.summaryBaseUrl,
 				apiKey: target.summaryApiKey,
@@ -1120,13 +1135,15 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				promptCacheKey: `${opts.promptCacheKey ?? shellSessionKey}/summary`,
 			})) {
 				if (ev.type === "text-delta") text += ev.text;
+				if (ev.type === "done") summaryFinish = ev.finishReason || "";
 				if (ev.type === "usage") {
 					// Compression is billed too; include it in run usage without
 					// confusing its small prompt with the active context occupancy.
 					emit({ ...ev, type: "usage", model: ev.model ?? target.summaryBareModel, source: "summary", promptTokens: ev.promptTokens ?? 0, completionTokens: ev.completionTokens ?? 0, totalTokens: lastPrompt + lastCompletion });
 				}
 			}
-			if (!text.trim()) throw new Error("empty summary");
+			// The finish reason distinguishes a refusal from thinking exhausting the output limit.
+			if (!text.trim()) throw new Error(`The summary model returned no text${summaryFinish ? ` (finish reason: ${summaryFinish})` : ""}.`);
 			return text.trim();
 		};
 
@@ -1277,10 +1294,34 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				if (prefix.length >= 2 && gain >= Math.max(2048, fittingBudget * COMPACT_MIN_GAIN_FRAC)) {
 					lastCompactionStep = step; // Cool down failed summaries too.
 					onHook?.("preCompact", { dropped: String(prefix.length), reason: "auto-summarize" });
-					const summaryTarget = await resolveSummaryTarget();
-					emit({ type: "compaction", status: "running", model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
-					try {
-						const summary = await summarizeSteps(prefix, summaryTarget);
+					let summary: string | undefined;
+					let summaryTarget = await resolveSummaryTarget();
+					let failureMessage: string | undefined;
+					for (;;) {
+						if (failureMessage === undefined) {
+							emit({ type: "compaction", status: "running", model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
+							try {
+								summary = await summarizeSteps(prefix, summaryTarget);
+								break;
+							} catch (error) {
+								if (signal.aborted) throw error;
+								logError("agent.compaction", error, { model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
+								failureMessage = error instanceof Error ? error.message : String(error);
+							}
+						}
+						const failure = { type: "compaction" as const, status: "failed" as const, model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel, error: failureMessage };
+						if (!opts.waitForCompactionDecision) { emit(failure); break; }
+						emit({ ...failure, paused: true });
+						const decision = await opts.waitForCompactionDecision(signal);
+						if (decision.action === "trim") { emit(failure); break; }
+						try {
+							summaryTarget = await resolveSummaryTarget(decision);
+							failureMessage = undefined;
+						} catch (error) {
+							failureMessage = `Could not use the selected model: ${error instanceof Error ? error.message : String(error)}`;
+						}
+					}
+					if (summary !== undefined) {
 						history.splice(0, history.length, {
 							kind: "user",
 							synthetic: true,
@@ -1292,9 +1333,8 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 						modelHistory = history;
 						contextReduced = true;
 						emit({ type: "compaction", status: "done", summary, model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
-						await onHook?.("postCompact", { summary }, undefined, signal);
-					} catch {
-						emit({ type: "compaction", status: "failed", model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
+						// The summary is already applied; a hook failure must not report it as failed.
+						try { await onHook?.("postCompact", { summary }, undefined, signal); } catch (error) { logError("agent.postCompact", error); }
 					}
 				}
 			}

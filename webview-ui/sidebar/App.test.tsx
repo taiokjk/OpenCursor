@@ -870,6 +870,50 @@ describe("production chat application lifecycle", () => {
     });
   });
 
+  it("pauses on a failed summary, reveals its error on click, and retries with a chosen thinking level", () => {
+    initial({ activeId: "A" });
+    message({
+      type: "modelsFetched",
+      models: ["__oauth__:antigravity::gemini-3.8-flash-high"],
+      modelList: [{ id: "__oauth__:antigravity::gemini-3.8-flash-high", modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", kind: "antigravity", providerName: "Google Antigravity", options: [], thinkingLevels: ["minimal", "low", "medium", "high"] }],
+    });
+    message({ type: "agentEvent", convId: "A", event: { type: "compaction", status: "running", model: "gemini-3.8-flash-high", thinkingLevel: "minimal" } });
+    message({ type: "agentEvent", convId: "A", event: { type: "compaction", status: "failed", model: "gemini-3.8-flash-high", thinkingLevel: "minimal", error: "400 thinking level minimal is not supported", paused: true } });
+    const cards = container.querySelectorAll(".compaction-card");
+    expect(cards).toHaveLength(1);
+    const card = cards[0];
+    expect(card.textContent).toContain("paused for your decision");
+    expect(card.querySelector(".compaction-error")?.textContent).toBe("400 thinking level minimal is not supported");
+
+    act(() => card.querySelector<HTMLElement>(".compaction-head")!.click());
+    expect(card.querySelector(".compaction-error")).toBeNull();
+    act(() => card.querySelector<HTMLElement>(".compaction-head")!.click());
+    expect(card.querySelector(".compaction-error")).not.toBeNull();
+
+    act(() => card.querySelector<HTMLElement>(".compaction-level")!.click());
+    const high = Array.from(document.body.querySelectorAll<HTMLElement>("[role='option']")).find((el) => el.textContent === "Thinking: high")!;
+    expect(high).toBeDefined();
+    act(() => high.click());
+    vi.mocked(vscode.postMessage).mockClear();
+    const retry = Array.from(card.querySelectorAll("button")).find((b) => b.textContent === "Try again")!;
+    act(() => retry.click());
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "resolveCompaction", action: "retry", thinkingLevel: "high" });
+  });
+
+  it("continues with trimming from a paused summary failure", () => {
+    initial({ activeId: "A" });
+    message({ type: "agentEvent", convId: "A", event: { type: "compaction", status: "failed", model: "m", thinkingLevel: "low", error: "boom", paused: true } });
+    vi.mocked(vscode.postMessage).mockClear();
+    const trim = Array.from(container.querySelectorAll(".compaction-card button")).find((b) => b.textContent === "Continue with trimming") as HTMLButtonElement;
+    act(() => trim.click());
+    expect(vscode.postMessage).toHaveBeenCalledWith({ type: "resolveCompaction", action: "trim" });
+    message({ type: "agentEvent", convId: "A", event: { type: "compaction", status: "failed", model: "m", thinkingLevel: "low", error: "boom" } });
+    const card = container.querySelector(".compaction-card")!;
+    expect(container.querySelectorAll(".compaction-card")).toHaveLength(1);
+    expect(card.textContent).toContain("older messages were trimmed instead");
+    expect(card.querySelector(".compaction-actions")).toBeNull();
+  });
+
   it("keeps composer drafts and selected models isolated per tab", () => {
     initial({
       activeId: "A",

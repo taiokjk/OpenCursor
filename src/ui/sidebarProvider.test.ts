@@ -19,6 +19,7 @@ import { DEFAULT_APPROVAL, type ApprovalPolicy } from "../agent/approvalPolicy";
 import { MODEL_CATALOG, type ModelDef } from "../stores/featureStore";
 import * as vscode from "vscode";
 import { pendingChanges } from "../stores/pendingChanges";
+import type { RunSession } from "./sidebar/session";
 
 vi.mock("vscode", () => ({ window: { showWarningMessage: vi.fn(), showErrorMessage: vi.fn(), state: { focused: true } }, commands: { executeCommand: vi.fn() } }));
 vi.mock("../agent/loop", () => ({ runAgent: vi.fn() }));
@@ -909,6 +910,29 @@ describe("host-owned transcripts and model output edits", () => {
     const wait = host._waitForQuotaReset(s, Date.now() + 3_600_000, s.abort.signal);
     host._resumeQuotaWait(a.id);
     await expect(wait).resolves.toBe("manual");
+  });
+
+  it("routes a compaction decision only to the paused run it targets", async () => {
+    const { host, a } = await fixture();
+    const s = session();
+    host._sessions.set(a.id, s);
+    host._activeId = a.id;
+    const parent = host._waitForCompactionDecision(s, s.abort.signal);
+    const child = host._waitForCompactionDecision(s, s.abort.signal, "task-1");
+    host._resolveCompaction(a.id, "task-1", { action: "retry", model: "__oauth__:antigravity::gemini-3.8-flash-high", thinkingLevel: "high" });
+    await expect(child).resolves.toEqual({ action: "retry", model: "__oauth__:antigravity::gemini-3.8-flash-high", thinkingLevel: "high" });
+    host._resolveCompaction(a.id, undefined, { action: "trim" });
+    await expect(parent).resolves.toEqual({ action: "trim" });
+    expect((s as RunSession).compactionWaiters?.size).toBe(0);
+  });
+
+  it("rejects a paused compaction when the run is stopped", async () => {
+    const { host } = await fixture();
+    const s = session();
+    const wait = host._waitForCompactionDecision(s, s.abort.signal);
+    s.abort.abort();
+    await expect(wait).rejects.toMatchObject({ name: "AbortError" });
+    expect((s as RunSession).compactionWaiters?.size).toBe(0);
   });
 
   it("resumes from checkpoint via resume429 without appending a duplicate user turn or reconciliation prompt", async () => {

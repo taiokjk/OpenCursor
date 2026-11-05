@@ -1464,8 +1464,27 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	min-width: 0;
 	flex-wrap: wrap;
 }
-.compaction-card.done .compaction-head {
+.compaction-card.done .compaction-head,
+.compaction-card.failed .compaction-head {
 	cursor: pointer;
+}
+.compaction-card.failed .compaction-body {
+	border-top-color: color-mix(in srgb, var(--error) 25%, transparent);
+}
+.compaction-error {
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--vscode-editor-font-family, monospace);
+	color: var(--fg);
+}
+.compaction-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+}
+.compaction-level {
+	min-width: 0;
 }
 .compaction-head:hover .compaction-title {
 	color: var(--fg);

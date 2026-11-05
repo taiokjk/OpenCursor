@@ -476,8 +476,80 @@ function MaxStepsCard({ block, running }: { block: import("./types").AssistantBl
   );
 }
 
+/** Thinking-level choices for the summary retry; "" keeps the automatic choice. */
+function compactionLevelChoices(model: ModelDef | undefined): { value: string; label: string }[] {
+  const levels = model?.thinkingLevels ?? [];
+  return [
+    { value: "", label: "Thinking: auto" },
+    ...levels.map((level) => ({ value: level === "none" ? "disabled" : level, label: `Thinking: ${level === "none" ? "off" : level}` })),
+  ];
+}
+
+/** Failed summary: shows the cause and, while the run is paused on it, lets the user retry or trim. */
+function FailedCompactionCard({ block, callId, meta }: {
+  block: import("./types").AssistantBlock & { kind: "compaction" };
+  callId?: string;
+  meta: React.ReactNode;
+}) {
+  const { modelList } = React.useContext(ModelPickerContext);
+  const [open, setOpen] = React.useState(!!block.paused);
+  const [model, setModel] = React.useState("");
+  const [level, setLevel] = React.useState("");
+  const [sent, setSent] = React.useState(false);
+  // A new failure (e.g. a retry that also failed) re-enables the controls.
+  React.useEffect(() => { setSent(false); if (block.paused) setOpen(true); }, [block.paused, block.error, block.model, block.thinkingLevel]);
+  const levels = React.useMemo(() => compactionLevelChoices(model
+    ? modelList.find((m) => m.id === model)
+    : modelList.find((m) => (m.modelId || m.id.replace(/^.*::/, "")) === block.model)), [modelList, model, block.model]);
+  React.useEffect(() => { if (!levels.some((choice) => choice.value === level)) setLevel(""); }, [levels, level]);
+  const resolve = (action: "retry" | "trim") => {
+    setSent(true);
+    post({
+      type: "resolveCompaction", action,
+      ...(callId ? { callId } : {}),
+      ...(action === "retry" && model ? { model } : {}),
+      ...(action === "retry" && level ? { thinkingLevel: level } : {}),
+    });
+  };
+  const title = block.paused
+    ? "Context summarization failed — paused for your decision."
+    : "Context summarization failed — older messages were trimmed instead.";
+  return (
+    <div className={"compaction-card failed" + (open ? " open" : "") + (block.paused ? " paused" : "")}>
+      <div className="compaction-head" role="button" tabIndex={0} aria-expanded={open}
+        title={open ? "Hide error details" : "Show error details"}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setOpen((o) => !o); } }}>
+        <div className="compaction-title">
+          <Icon name={open ? "chevD" : "chevR"} size={12} />
+          <span>{title}</span>
+        </div>
+        {meta}
+      </div>
+      {open && (
+        <div className="compaction-body compaction-error">
+          {block.error || "No error details were recorded for this failure."}
+        </div>
+      )}
+      {block.paused && (
+        <div className="compaction-actions">
+          <InlineModelPicker selected={model || block.model || ""} onSelect={setModel} />
+          {levels.length > 1 && (
+            <Select aria-label="Thinking level for the summary" className="compaction-level" value={level} disabled={sent}
+              onChange={(event) => setLevel(event.target.value)}>
+              {levels.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+            </Select>
+          )}
+          <button type="button" className="ap-btn allow" disabled={sent} onClick={() => resolve("retry")}>Try again</button>
+          <button type="button" className="ap-btn deny" disabled={sent} onClick={() => resolve("trim")}>Continue with trimming</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** In-chat marker: earlier conversation auto-summarized to free context. */
-function CompactionCard({ block }: { block: import("./types").AssistantBlock & { kind: "compaction" } }) {
+function CompactionCard({ block, callId }: { block: import("./types").AssistantBlock & { kind: "compaction" }; callId?: string }) {
   const [open, setOpen] = React.useState(false);
   const meta = (block.model || block.thinkingLevel) ? (
     <div className="compaction-meta">
@@ -499,18 +571,7 @@ function CompactionCard({ block }: { block: import("./types").AssistantBlock & {
       </div>
     );
   }
-  if (block.status === "failed") {
-    return (
-      <div className="compaction-card failed">
-        <div className="compaction-head">
-          <div className="compaction-title">
-            <span>Context summarization failed — older messages were trimmed instead.</span>
-          </div>
-          {meta}
-        </div>
-      </div>
-    );
-  }
+  if (block.status === "failed") return <FailedCompactionCard block={block} callId={callId} meta={meta} />;
   return (
     <div className={"compaction-card done" + (open ? " open" : "")}>
       <div className="compaction-head" onClick={() => setOpen((o) => !o)}>
@@ -777,6 +838,7 @@ const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex,
   const waiting = running && turn.blocks.some(block => block.kind === "error" && !!block.retrying?.resumeAt);
   const forceOpen = turn.blocks.some(block =>
     block.kind === "error" && !!block.retrying?.resumeAt ||
+    block.kind === "compaction" && !!block.paused ||
     block.kind === "tool" && (
       !!approvals[block.callId] || !!taskApprovals[block.callId]?.length ||
       block.status === "running" && (block.name === "AskQuestion" || block.name === "ask_question")
@@ -868,7 +930,7 @@ function SubagentChat({
               ) : b.kind === "error" ? (
                 <div className="block-group" key={bi}><ErrorCard block={b} callId={block.callId} defaultModel={String(block.input?.model || "")} /></div>
               ) : b.kind === "compaction" ? (
-                <div className="block-group" key={bi}><CompactionCard block={b} /></div>
+                <div className="block-group" key={bi}><CompactionCard block={b} callId={block.callId} /></div>
               ) : b.kind === "max-steps" ? (
                 <div className="block-group" key={bi}><MaxStepsCard block={b} running={false} /></div>
               ) : b.kind === "verification" ? (
@@ -1735,7 +1797,7 @@ export function App() {
             else if (ev.type === "tool-call-completed") s.status = { text: "Planning next moves" };
             else if (ev.type === "retry") s.status = { text: `Retrying (${ev.attempt}/${ev.max})…` };
             else if (ev.type === "usage" && (!ev.source || ev.source === "parent")) s.usedTokens = ev.totalTokens;
-            else if (ev.type === "compaction") s.status = { text: ev.status === "running" ? "Summarizing conversation" : "Planning next moves" };
+            else if (ev.type === "compaction") s.status = { text: ev.status === "running" ? "Summarizing conversation" : ev.paused ? "Waiting for your decision" : "Planning next moves" };
             else if (ev.type === "shell-notify") s.status = { text: ev.message };
             else if (ev.type === "error") {
               // The host records the error block in its own transcript.
@@ -1760,6 +1822,7 @@ export function App() {
             ev.type === "tool-call-started" ||
             ev.type === "user-steering" ||
             ev.type === "retry" ||
+            ev.type === "compaction" ||
             ev.type === "error" ||
             ev.type === "run-result"
           ) {

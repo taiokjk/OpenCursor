@@ -11,6 +11,7 @@ import type { Turn } from "../../shared/turns";
 import type { ApprovalActionType } from "../../agent/approvalPolicy";
 import type { Step } from "../../agent/types";
 import type { ContextState } from "../../agent/contextState";
+import type { CompactionDecision } from "../../agent/loopTypes";
 
 /** An in-chat approval request awaiting the user's decision. */
 export interface PendingApproval {
@@ -40,6 +41,8 @@ export interface RunSession {
   pendingApprovals: Map<string, { info: PendingApproval; resolve: (ok: boolean) => void }>;
   /** Active in-place 429 quota countdown resolvers that wake on "Resume now". */
   quotaWaiters?: Set<(opts?: { callId?: string; model?: string }) => void>;
+  /** Runs paused on a failed context summary, keyed by subagent callId ("" = parent run). */
+  compactionWaiters?: Map<string, (decision: CompactionDecision) => void>;
   /** Authoritative live UI turns, owned by the host so the run survives any webview churn. */
   turns: Turn[];
   /** Live model transcript and checkpoint, saved alongside the rendered turns. */

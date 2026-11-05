@@ -10,6 +10,8 @@
 import * as vscode from "vscode";
 import { SettingsManager } from "../stores/settingsManager";
 import { runAgent } from "../agent/loop";
+import type { CompactionDecision } from "../agent/loopTypes";
+import { getThinkingLevels } from "../agent/oauth/protocols/providers/thinkingLevels.js";
 import { AgentEvent, Mode, Attachment } from "../agent/types";
 import { listModels, generateTitle, pickModel } from "../agent/provider";
 import { providerApiKeyPool, type ApiKeyPool } from "../agent/provider/apiKeyPool";
@@ -49,6 +51,15 @@ import { reviewInstructions, type QueuedMessage, type ReviewTarget, type GoalSta
 function isWebUrl(value: unknown): value is string {
   if (typeof value !== "string") return false;
   try { const url = new URL(value); return url.protocol === "http:" || url.protocol === "https:"; } catch { return false; }
+}
+
+/** Attach each model's selectable thinking levels so in-chat retry pickers only offer valid ones. */
+function withThinkingLevels(list: ModelDef[]): (ModelDef & { thinkingLevels?: string[] })[] {
+  return list.map((m) => {
+    const kind = Array.isArray(m.kind) ? m.kind[0] : m.kind;
+    const levels = getThinkingLevels(kind ?? "", m.modelId ?? stripModelScope(m.id));
+    return levels?.length ? { ...m, thinkingLevels: [...levels] } : m;
+  });
 }
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -619,6 +630,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             model: typeof data.model === "string" && data.model ? data.model : undefined,
           });
           break;
+        case "resolveCompaction": {
+          const callId = typeof data.callId === "string" && data.callId ? data.callId : undefined;
+          const text = (value: unknown) => typeof value === "string" && value ? value : undefined;
+          this._resolveCompaction(data.convId, callId, data.action === "trim"
+            ? { action: "trim" }
+            : { action: "retry", model: text(data.model), thinkingLevel: text(data.thinkingLevel) });
+          break;
+        }
         case "resumeCheckpoint":
           await this._resumeCheckpoint(data.convId ?? this._activeId, {
             callId: typeof data.callId === "string" ? data.callId : undefined,
@@ -1455,6 +1474,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /** Pause a run (or one subagent, by callId) until the user resolves its failed context summary. */
+  private _waitForCompactionDecision(session: RunSession, signal: AbortSignal, callId?: string): Promise<CompactionDecision> {
+    return new Promise((resolve, reject) => {
+      const abortError = () => Object.assign(new Error("cancelled"), { name: "AbortError" });
+      if (signal.aborted) { reject(abortError()); return; }
+      const key = callId ?? "";
+      const waiters = session.compactionWaiters ?? (session.compactionWaiters = new Map());
+      const onAbort = () => { if (waiters.get(key) === settle) waiters.delete(key); reject(abortError()); };
+      const settle = (decision: CompactionDecision) => {
+        waiters.delete(key);
+        signal.removeEventListener("abort", onAbort);
+        resolve(decision);
+      };
+      waiters.set(key, settle);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private _resolveCompaction(convId: string | null | undefined, callId: string | undefined, decision: CompactionDecision): void {
+    const id = convId ?? this._activeId;
+    const session = id ? this._sessions.get(id) : undefined;
+    session?.compactionWaiters?.get(callId ?? "")?.(decision);
+  }
+
   private _resumeQuotaWait(convId?: string | null, opts?: { callId?: string; model?: string }): void {
     const id = convId ?? this._activeId;
     if (id && opts?.model && !opts?.callId && this._store.has(id)) {
@@ -1969,7 +2012,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({ type: "modelSelected", model: settings.model });
       });
     }
-    this._view?.webview.postMessage({ type: "modelsFetched", models: allIds, modelList });
+    this._view?.webview.postMessage({ type: "modelsFetched", models: allIds, modelList: withThinkingLevels(modelList) });
   }
 
   /**
@@ -2534,6 +2577,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         },
         askUser: (callId, _header, _questions, sig) => this._askUser(session, callId, sig),
         waitForQuotaReset: (resumeAt, sig, callId) => this._waitForQuotaReset(session, resumeAt, sig, callId),
+        waitForCompactionDecision: (sig, callId) => this._waitForCompactionDecision(session, sig, callId),
         onAfterRun: () => runHooks(features.hooks, "afterRun", { prompt: text }),
         onBeforeShell: (command, hookSignal) => runBlockingHooks(features.hooks, "beforeShell", { command }, undefined, hookSignal ?? session.abort.signal),
         onAfterEdit: (path) => runHooks(features.hooks, "afterEdit", { path }),

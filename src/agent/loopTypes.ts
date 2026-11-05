@@ -15,6 +15,11 @@ import type { SubagentDef } from "../stores/featureStore";
 import type { TeamDef } from "./teams";
 import type { ContextState } from "./contextState";
 
+/** User's answer to a failed context summarization. Omitted fields fall back to the automatic choice. */
+export type CompactionDecision =
+	| { action: "retry"; model?: string; thinkingLevel?: string }
+	| { action: "trim" };
+
 /** Every input needed to drive a single {@link runAgent} run. */
 export interface RunAgentOptions {
 	workspaceRoot?: string;
@@ -89,6 +94,8 @@ export interface RunAgentOptions {
 	askUser?: (callId: string, header: string | undefined, questions: AskQuestionItem[], signal?: AbortSignal) => Promise<Record<string, string[]>>;
 	/** Pause in-place on 429 quota exhaustion until `resumeAt` or manual user resume (optionally switching model). */
 	waitForQuotaReset?: (resumeAt: number, signal: AbortSignal, callId?: string) => Promise<"timer" | "manual" | { action: "manual"; model?: string }>;
+	/** Pause after a failed context summary until the user retries or accepts trimming. Absent = trim immediately. */
+	waitForCompactionDecision?: (signal: AbortSignal, callId?: string) => Promise<CompactionDecision>;
 	onAfterRun?: () => void;
 	/** Blocking before-shell hook: resolves with a block reason to veto the command. */
 	onBeforeShell?: (command: string, signal?: AbortSignal) => Promise<string | undefined> | void;

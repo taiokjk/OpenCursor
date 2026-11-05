@@ -81,6 +81,8 @@ export interface ModelDef {
   providerId?: string;
   /** Bare model id without provider prefix. */
   modelId?: string;
+  /** Selectable thinking levels ("none" = disabled); absent for non-reasoning models. */
+  thinkingLevels?: string[];
 }
 
 export type MentionKind =
@@ -173,6 +175,7 @@ export type OutMessage =
   | { type: "continueRun"; always?: boolean }
   | { type: "resumeQuotaWait"; convId?: string; callId?: string; model?: string }
   | { type: "resumeCheckpoint"; convId?: string; callId?: string; model?: string }
+  | { type: "resolveCompaction"; convId?: string; callId?: string; action: "retry" | "trim"; model?: string; thinkingLevel?: string }
   | { type: "revertToMessage"; index: number; revertFiles?: boolean }
   | { type: "browseAttachments" }
   | { type: "openSettings"; section?: string }

@@ -59,6 +59,11 @@ export function prepareGoogleMessages(messages: WireMessage[], model: string): W
   });
 }
 
+/** Gemini 3.7/3.8 Flash and Pro have no "minimal" thinking level; "low" is their floor. */
+export function geminiRejectsMinimalThinking(model: string): boolean {
+  return /^gemini-3\.[78]-flash(?:-|$)/i.test(model) || /^gemini-(?:3(?:\.\d+)?-pro|2\.5-pro)(?:-|$)/i.test(model);
+}
+
 /** Apply supported options after constructing the standard chat request. */
 export function applyGoogleOpenAIOptions(body: Record<string, unknown>, model: string, params?: ModelParams): void {
   // https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash
@@ -74,12 +79,11 @@ export function applyGoogleOpenAIOptions(body: Record<string, unknown>, model: s
   let effort = selected.toLowerCase().trim();
   if (["auto", "default", ""].includes(effort)) { delete body.reasoning_effort; return; }
   if (["xhigh", "max"].includes(effort)) effort = "high";
-  const newerFlash = /^gemini-3\.[78]-flash(?:-|$)/i.test(model);
-  const pro = /^gemini-(?:3(?:\.\d+)?-pro|2\.5-pro)(?:-|$)/i.test(model);
+  const noMinimal = geminiRejectsMinimalThinking(model);
   if (["none", "off", "disabled"].includes(effort)) {
-    effort = newerFlash || pro ? "low" : /^gemini-[3-9](?:[.-]|$)/i.test(model) ? "minimal" : "none";
+    effort = noMinimal ? "low" : /^gemini-[3-9](?:[.-]|$)/i.test(model) ? "minimal" : "none";
   }
-  if (effort === "minimal" && (newerFlash || pro)) effort = "low";
+  if (effort === "minimal" && noMinimal) effort = "low";
   if (["none", "minimal", "low", "medium", "high"].includes(effort)) body.reasoning_effort = effort;
   else delete body.reasoning_effort;
 }

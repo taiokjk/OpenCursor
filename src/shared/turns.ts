@@ -41,7 +41,7 @@ export type AgentEvent =
   | { type: "mode-changed"; mode: Mode }
   | { type: "shell-notify"; message: string }
   | { type: "retry"; attempt: number; max: number; delayMs: number; resumeAt?: number; error: string }
-  | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string; model?: string; thinkingLevel?: string }
+  | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string; model?: string; thinkingLevel?: string; error?: string; paused?: boolean }
   | { type: "max-steps"; steps: number }
   | { type: "error"; message: string };
 
@@ -101,6 +101,10 @@ export interface CompactionBlock {
   model?: string;
   /** Effective thinking level / reasoning effort of the summarization step. */
   thinkingLevel?: string;
+  /** Why the summarization failed (status "failed"). */
+  error?: string;
+  /** The run is waiting for the user to retry or accept trimming. */
+  paused?: boolean;
 }
 /** Run paused at the step limit — chat shows a Continue button. */
 export interface MaxStepsBlock {
@@ -318,9 +322,9 @@ export function applyToBlocks(blocksIn: AssistantBlock[], ev: AgentEvent): Assis
     if (last && last.kind === "error") blocks[blocks.length - 1] = note;
     else blocks.push(note);
   } else if (ev.type === "compaction") {
-    const note: CompactionBlock = { kind: "compaction", status: ev.status, summary: ev.summary, model: ev.model, thinkingLevel: ev.thinkingLevel };
-    if (last && last.kind === "compaction" && last.status === "running") {
-      blocks[blocks.length - 1] = { ...last, ...note, model: note.model ?? last.model, thinkingLevel: note.thinkingLevel ?? last.thinkingLevel };
+    const note = compactionBlock(ev);
+    if (isOpenCompaction(last)) {
+      blocks[blocks.length - 1] = { ...note, model: note.model ?? last.model, thinkingLevel: note.thinkingLevel ?? last.thinkingLevel };
     } else {
       blocks.push(note);
     }
@@ -353,6 +357,18 @@ function findTool(turns: Turn[], callId: string): ToolLocation | undefined {
 }
 
 /** Copy only the owning turn and block so newer turns and memoized cards stay intact. */
+function compactionBlock(ev: Extract<AgentEvent, { type: "compaction" }>): CompactionBlock {
+  return {
+    kind: "compaction", status: ev.status, summary: ev.summary, model: ev.model, thinkingLevel: ev.thinkingLevel,
+    ...(ev.error ? { error: ev.error } : {}), ...(ev.paused ? { paused: true } : {}),
+  };
+}
+
+/** A running or paused card is still in progress; its next event (retry, result, or trim) replaces it in place. */
+function isOpenCompaction(block: AssistantBlock | undefined): block is CompactionBlock {
+  return block?.kind === "compaction" && (block.status === "running" || !!block.paused);
+}
+
 function updateTool(turns: Turn[], location: ToolLocation, block: ToolBlock): Turn[] {
   const list = [...turns];
   const turn = turns[location.turnIndex] as AssistantTurn;
@@ -597,9 +613,9 @@ export function applyEvent(turns: Turn[], ev: AgentEvent): Turn[] {
   if (ev.type === "compaction") {
     const { list, turn } = ensureAssistant(turns);
     const last = turn.blocks[turn.blocks.length - 1];
-    const block: CompactionBlock = { kind: "compaction", status: ev.status, summary: ev.summary, model: ev.model, thinkingLevel: ev.thinkingLevel };
-    if (last && last.kind === "compaction" && last.status === "running") {
-      turn.blocks[turn.blocks.length - 1] = { ...last, ...block, model: block.model ?? last.model, thinkingLevel: block.thinkingLevel ?? last.thinkingLevel };
+    const block = compactionBlock(ev);
+    if (isOpenCompaction(last)) {
+      turn.blocks[turn.blocks.length - 1] = { ...block, model: block.model ?? last.model, thinkingLevel: block.thinkingLevel ?? last.thinkingLevel };
     } else {
       turn.blocks.push(block);
     }
@@ -668,9 +684,9 @@ export function forceSettleOpenWork(turns: Turn[], reason: "cancelled" | "error"
         }
         return next;
       }
-      if (b.kind === "compaction" && b.status === "running") {
+      if (b.kind === "compaction" && (b.status === "running" || b.paused)) {
         changed = true;
-        return { ...b, status: "failed" as const };
+        return { ...b, status: "failed" as const, paused: undefined };
       }
       if (b.kind === "error" && b.retrying) {
         changed = true;
