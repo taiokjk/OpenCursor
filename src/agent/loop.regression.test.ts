@@ -106,7 +106,7 @@ vi.mock("../integrations/mcpClient", async () => ({
 }));
 vi.mock("../logging", () => ({ logError: vi.fn() }));
 
-import { runAgent, resolveCompactionThinkingLevel, compactionReasoning, findCompactionFallbackModel } from "./loop";
+import { runAgent, resolveCompactionThinkingLevel, compactionReasoning, findCompactionFallbackModel, describeCompactionFailure } from "./loop";
 import { writePlanTool } from "./tools/agent";
 import { TOOLS } from "./tools";
 import * as cursorContext from "../context/cursorContext";
@@ -796,7 +796,7 @@ describe("runAgent context consumption", () => {
 		expect(events.filter((event) => event.type === "compaction")).toEqual([
 			{ type: "compaction", status: "running", model: "test-model", thinkingLevel: "disabled" },
 			summaryFails
-				? { type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: "Summary provider temporarily unavailable" }
+				? { type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: expect.stringContaining("Error: Error: Summary provider temporarily unavailable") }
 				: { type: "compaction", status: "done", summary, model: "test-model", thinkingLevel: "disabled" },
 		]);
 		if (!summaryFails) expect(events).toContainEqual(expect.objectContaining({ type: "usage", promptTokens: 750, completionTokens: 60 }));
@@ -838,7 +838,7 @@ describe("runAgent context consumption", () => {
 		expect(decisions).toEqual([undefined]);
 		expect(events.filter((event) => event.type === "compaction")).toEqual([
 			{ type: "compaction", status: "running", model: "test-model", thinkingLevel: "disabled" },
-			{ type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: "400 thinking level minimal is not supported", paused: true },
+			{ type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: expect.stringContaining("400 thinking level minimal is not supported"), paused: true },
 			{ type: "compaction", status: "running", model: "gemini-3.8-flash-high", thinkingLevel: "high" },
 			{ type: "compaction", status: "done", summary, model: "gemini-3.8-flash-high", thinkingLevel: "high" },
 		]);
@@ -887,9 +887,29 @@ describe("runAgent context consumption", () => {
 		});
 		expect(paused).toBe(1);
 		expect(events.filter((event) => event.type === "compaction" && event.paused)).toEqual([
-			{ type: "compaction", status: "failed", model: "claude-sonnet-5.5", thinkingLevel: expect.any(String), error: "fallback failure", paused: true },
+			{ type: "compaction", status: "failed", model: "claude-sonnet-5.5", thinkingLevel: expect.any(String), error: expect.stringContaining("fallback failure"), paused: true },
 		]);
+		// The pause shows both attempts so neither failure is lost.
+		const report = events.find((event) => event.type === "compaction" && event.paused);
+		const text = report?.type === "compaction" ? report.error ?? "" : "";
+		expect(text).toContain("Model: claude-sonnet-5.5");
+		expect(text).toContain("--- Earlier attempt ---");
+		expect(text).toContain("Model: test-model");
+		expect(text).toContain("Error: Error: first failure");
 		expectFinished(events, "Continued with trimming.", 3);
+	});
+
+	it("reports status, provider detail, cause and stack for a failed summary", () => {
+		const cause = Object.assign(new Error("MALFORMED_FUNCTION_CALL"), { diagnostic: "finishReason=MALFORMED_FUNCTION_CALL calls=0" });
+		const error = Object.assign(new Error("Error executing function"), { name: "ChatHTTPError", status: 400, cause });
+		const report = describeCompactionFailure(error, { model: "gemini-3.8-flash-high", provider: "antigravity", thinkingLevel: "low", steps: 12 });
+		expect(report).toContain("Model: gemini-3.8-flash-high (antigravity), thinking: low");
+		expect(report).toContain("Summarizing 12 older step(s)");
+		expect(report).toContain("Error: ChatHTTPError: Error executing function");
+		expect(report).toContain("HTTP status: 400");
+		expect(report).toContain("Caused by: Error: MALFORMED_FUNCTION_CALL");
+		expect(report).toContain("Provider detail: finishReason=MALFORMED_FUNCTION_CALL calls=0");
+		expect(report).toMatch(/Stack:\n\s+at /);
 	});
 
 	it("does not fall back when the failing model is already Claude Sonnet 5.5", () => {
@@ -910,8 +930,8 @@ describe("runAgent context consumption", () => {
 		});
 		expect(events.filter((event) => event.type === "compaction")).toEqual([
 			{ type: "compaction", status: "running", model: "test-model", thinkingLevel: "disabled" },
-			{ type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: "summary unavailable", paused: true },
-			{ type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: "summary unavailable" },
+			{ type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: expect.stringContaining("summary unavailable"), paused: true },
+			{ type: "compaction", status: "failed", model: "test-model", thinkingLevel: "disabled", error: expect.stringContaining("summary unavailable") },
 		]);
 		expectFinished(events, "Continued with trimming.", 2);
 	});
@@ -932,7 +952,7 @@ describe("runAgent context consumption", () => {
 		});
 		const failures = events.filter((event) => event.type === "compaction" && event.status === "failed");
 		expect(failures.map((event) => event.type === "compaction" && event.error)).toEqual([
-			"first failure",
+			expect.stringContaining("Error: Error: first failure"),
 			"Could not use the selected model: provider removed",
 			"Could not use the selected model: provider removed",
 		]);

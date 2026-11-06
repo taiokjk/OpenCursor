@@ -342,6 +342,32 @@ export function resolveCompactionThinkingLevel(model: string, oauthKind?: string
 
 /** Summary request params for `level`. The displayed label is derived here too,
  *  so the UI always reports the level that is actually sent. */
+/**
+ * Multi-line report for a failed summary: where it failed (model, provider,
+ * HTTP status), the provider's raw detail, and the stack of each cause, so it
+ * can be pasted into a bug report as-is.
+ */
+export function describeCompactionFailure(error: unknown, context: { model: string; provider?: string; thinkingLevel: string; steps: number }): string {
+	const lines = [
+		`Model: ${context.model}${context.provider ? ` (${context.provider})` : ""}, thinking: ${context.thinkingLevel}`,
+		`Summarizing ${context.steps} older step(s)`,
+	];
+	const seen = new Set<unknown>();
+	for (let current: unknown = error, depth = 0; current !== undefined && !seen.has(current) && depth < 4; depth++) {
+		seen.add(current);
+		const label = depth === 0 ? "Error" : "Caused by";
+		if (!(current instanceof Error)) { lines.push(`${label}: ${String(current)}`); break; }
+		lines.push(`${label}: ${current.name}: ${current.message}`);
+		const { status, diagnostic } = current as { status?: unknown; diagnostic?: unknown };
+		if (status !== undefined) lines.push(`  HTTP status: ${String(status)}`);
+		if (typeof diagnostic === "string" && diagnostic) lines.push(`  Provider detail: ${diagnostic}`);
+		const frames = (current.stack ?? "").split("\n").filter((l) => /^\s+at /.test(l)).slice(0, depth === 0 ? 8 : 4);
+		if (frames.length) lines.push(`  Stack:`, ...frames.map((l) => `  ${l.trim()}`));
+		current = (current as { cause?: unknown }).cause;
+	}
+	return lines.join("\n");
+}
+
 const COMPACTION_FALLBACK_MODEL = /(?:^|[:/])claude-sonnet-5[.-]5(?:$|[^\d])/i;
 
 /** The model tried automatically after the first summary attempt fails. */
@@ -1306,6 +1332,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 					let summaryTarget = await resolveSummaryTarget();
 					let failureMessage: string | undefined;
 					let autoFallbackTried = false;
+					const earlierAttempts: string[] = [];
 					for (;;) {
 						if (failureMessage === undefined) {
 							emit({ type: "compaction", status: "running", model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
@@ -1315,18 +1342,21 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 							} catch (error) {
 								if (signal.aborted) throw error;
 								logError("agent.compaction", error, { model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
-								failureMessage = error instanceof Error ? error.message : String(error);
+								const report = describeCompactionFailure(error, { model: summaryTarget.summaryBareModel, provider: summaryTarget.summaryOAuthKind, thinkingLevel: summaryTarget.summaryThinkingLevel, steps: prefix.length });
+								failureMessage = earlierAttempts.length ? `${report}\n\n--- Earlier attempt ---\n${earlierAttempts.join("\n\n--- Earlier attempt ---\n")}` : report;
 								// One automatic fallback before bothering the user.
 								if (!autoFallbackTried) {
 									autoFallbackTried = true;
 									const fallback = findCompactionFallbackModel(availableModels, summaryTarget.summaryModel);
 									if (fallback) {
+										earlierAttempts.push(report);
 										try {
 											summaryTarget = await resolveSummaryTarget({ model: fallback });
 											failureMessage = undefined;
 											continue;
 										} catch (fallbackError) {
 											logError("agent.compaction", fallbackError, { fallback });
+											failureMessage = `${report}\n\n--- Automatic fallback to ${fallback} could not start ---\n${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`;
 										}
 									}
 								}

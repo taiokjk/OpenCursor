@@ -85,10 +85,21 @@ export const ANTIGRAVITY_CONFIG = {
 } as const;
 
 export class AntigravityProtocolError extends Error {
-  constructor(public status: number, message: string) {
+  /** Raw provider detail for the diagnostics view; never part of `message`. */
+  diagnostic?: string;
+  constructor(public status: number, message: string, diagnostic?: string) {
     super(message);
     this.name = "AntigravityProtocolError";
+    if (diagnostic) this.diagnostic = diagnostic;
   }
+}
+
+/** Compact, credential-scrubbed JSON of a provider payload for error reports. */
+function rawDetail(value: unknown, limit = 2000): string {
+  let text: string;
+  try { text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value); }
+  catch { text = String(value); }
+  return text.replace(/\b(?:Bearer\s+)?[A-Za-z0-9._~+/=-]{32,}\b/g, "[redacted]").slice(0, limit);
 }
 
 export function antigravityHeaders(token: string, options: {
@@ -392,7 +403,8 @@ export async function* parseAntigravityStream(reader: ReadableStreamDefaultReade
         if (event) yield { ...event, ...(options.requestId ? { requestId: options.requestId } : {}), ...(options.model ? { model: options.model } : {}) };
       }
       const error = chunk.error ?? response.error;
-      if (error) throw new AntigravityProtocolError(Number(error.code) || 502, `Antigravity stream error: ${error.message || "unknown error"}`);
+      if (error) throw new AntigravityProtocolError(Number(error.code) || 502, `Antigravity stream error: ${error.message || "unknown error"}`,
+        `in-band stream error frame: ${rawDetail(error)}`);
       if (response.promptFeedback?.blockReason) throw new AntigravityProtocolError(400, `Antigravity blocked prompt: ${response.promptFeedback.blockReason}`);
       const candidate = response.candidates?.[0];
       for (const part of candidate?.content?.parts ?? []) {
@@ -418,7 +430,11 @@ export async function* parseAntigravityStream(reader: ReadableStreamDefaultReade
       }
       if (candidate?.finishReason) {
         finishReason = String(candidate.finishReason).toLowerCase();
-        if (!["stop", "max_tokens"].includes(finishReason)) throw new AntigravityProtocolError(400, `Antigravity ended generation: ${finishReason}`);
+        if (!["stop", "max_tokens"].includes(finishReason)) {
+          throw new AntigravityProtocolError(400, `Antigravity ended generation: ${finishReason}`,
+            `finishReason=${candidate.finishReason}${candidate.finishMessage ? ` finishMessage=${rawDetail(candidate.finishMessage, 600)}` : ""}` +
+            ` calls=${calls.length} partialCandidate=${rawDetail(candidate, 1500)}`);
+        }
         // The terminal candidate is sufficient: some SSE connections stay open.
         // Its nested/wrapper usage has already been consumed above. Closing the
         // iterator now also cancels the reader instead of waiting for TCP EOF.

@@ -1525,7 +1525,9 @@ async function* streamAntigravity(id: string, opts: {
     }
     yield* parseAntigravityStream(response.body.getReader(), { signal: opts.signal });
   } catch (error) {
-    if (error instanceof AntigravityProtocolError) throw new ChatHTTPError(error.status, error.message);
+    if (error instanceof AntigravityProtocolError) {
+      throw Object.assign(new ChatHTTPError(error.status, error.message), { diagnostic: error.diagnostic, cause: error });
+    }
     throw error;
   }
 }
