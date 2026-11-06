@@ -106,7 +106,7 @@ vi.mock("../integrations/mcpClient", async () => ({
 }));
 vi.mock("../logging", () => ({ logError: vi.fn() }));
 
-import { runAgent, resolveCompactionThinkingLevel, compactionReasoning } from "./loop";
+import { runAgent, resolveCompactionThinkingLevel, compactionReasoning, findCompactionFallbackModel } from "./loop";
 import { writePlanTool } from "./tools/agent";
 import { TOOLS } from "./tools";
 import * as cursorContext from "../context/cursorContext";
@@ -846,6 +846,57 @@ describe("runAgent context consumption", () => {
 		expect(fixture.requests[1].modelParams).toMatchObject({ reasoningEffort: "high" });
 		expect(fixture.requests[1].modelParams?.thinking).toBeUndefined();
 		expectFinished(events, "Continued after retry.", 3);
+	});
+
+	it("falls back to Claude Sonnet 5.5 automatically before pausing", async () => {
+		const history = olderReadHistory("Inspect dependency initialization.", "DETAIL_FOR_FALLBACK");
+		const summary = "Recovered by the fallback model.";
+		const sonnet = "__oauth__:claude-code::claude-sonnet-5.5";
+		const { events } = await run([
+			() => { throw new Error("Error executing function"); },
+			answer(summary),
+			answer("Continued after fallback."),
+		], {
+			prompt: "Continue.", history, contextTokens: 12_000, maxTokens: 1024,
+			availableModels: ["test-model", sonnet],
+			resolveModelOptions: (next) => ({ model: next.slice(next.indexOf("::") + 2), contextTokens: 1_000_000 }),
+			waitForCompactionDecision: async () => { throw new Error("must not pause"); },
+		});
+		expect(events.filter((event) => event.type === "compaction").map((event) => event.type === "compaction" && [event.status, event.model])).toEqual([
+			["running", "test-model"],
+			["running", "claude-sonnet-5.5"],
+			["done", "claude-sonnet-5.5"],
+		]);
+		expect(fixture.requests[1].model).toBe("claude-sonnet-5.5");
+		expectFinished(events, "Continued after fallback.", 3);
+	});
+
+	it("pauses with the fallback's error when both the model and Claude Sonnet 5.5 fail", async () => {
+		const history = olderReadHistory("Inspect dependency initialization.", "DETAIL_FOR_DOUBLE_FAILURE");
+		const sonnet = "__oauth__:claude-code::claude-sonnet-5.5";
+		let paused = 0;
+		const { events } = await run([
+			() => { throw new Error("first failure"); },
+			() => { throw new Error("fallback failure"); },
+			answer("Continued with trimming."),
+		], {
+			prompt: "Continue.", history, contextTokens: 12_000, maxTokens: 1024,
+			availableModels: ["test-model", sonnet],
+			resolveModelOptions: (next) => ({ model: next.slice(next.indexOf("::") + 2), contextTokens: 1_000_000 }),
+			waitForCompactionDecision: async () => (paused++, { action: "trim" }),
+		});
+		expect(paused).toBe(1);
+		expect(events.filter((event) => event.type === "compaction" && event.paused)).toEqual([
+			{ type: "compaction", status: "failed", model: "claude-sonnet-5.5", thinkingLevel: expect.any(String), error: "fallback failure", paused: true },
+		]);
+		expectFinished(events, "Continued with trimming.", 3);
+	});
+
+	it("does not fall back when the failing model is already Claude Sonnet 5.5", () => {
+		expect(findCompactionFallbackModel(["a", "__oauth__:claude-code::claude-sonnet-5.5"], "__oauth__:claude-code::claude-sonnet-5.5")).toBeUndefined();
+		expect(findCompactionFallbackModel(["a", "claude-sonnet-5-5-20260101"], "a")).toBe("claude-sonnet-5-5-20260101");
+		expect(findCompactionFallbackModel(["a", "claude-sonnet-5"], "a")).toBeUndefined();
+		expect(findCompactionFallbackModel(undefined, "a")).toBeUndefined();
 	});
 
 	it("trims without a summary when the user chooses to continue after a failure", async () => {

@@ -342,6 +342,14 @@ export function resolveCompactionThinkingLevel(model: string, oauthKind?: string
 
 /** Summary request params for `level`. The displayed label is derived here too,
  *  so the UI always reports the level that is actually sent. */
+const COMPACTION_FALLBACK_MODEL = /(?:^|[:/])claude-sonnet-5[.-]5(?:$|[^\d])/i;
+
+/** The model tried automatically after the first summary attempt fails. */
+export function findCompactionFallbackModel(available: readonly string[] | undefined, failedModel: string): string | undefined {
+	const fallback = available?.find((m) => COMPACTION_FALLBACK_MODEL.test(m));
+	return fallback && fallback.toLowerCase() !== failedModel.toLowerCase() ? fallback : undefined;
+}
+
 export function compactionReasoning(level: string, base?: ModelParams): { modelParams: ModelParams; thinkingLevel: string } {
 	if (["disabled", "none", "off"].includes(level)) {
 		return { modelParams: { ...base, thinking: "disabled", reasoningEffort: "low" }, thinkingLevel: "disabled" };
@@ -1297,6 +1305,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 					let summary: string | undefined;
 					let summaryTarget = await resolveSummaryTarget();
 					let failureMessage: string | undefined;
+					let autoFallbackTried = false;
 					for (;;) {
 						if (failureMessage === undefined) {
 							emit({ type: "compaction", status: "running", model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
@@ -1307,6 +1316,20 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 								if (signal.aborted) throw error;
 								logError("agent.compaction", error, { model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel });
 								failureMessage = error instanceof Error ? error.message : String(error);
+								// One automatic fallback before bothering the user.
+								if (!autoFallbackTried) {
+									autoFallbackTried = true;
+									const fallback = findCompactionFallbackModel(availableModels, summaryTarget.summaryModel);
+									if (fallback) {
+										try {
+											summaryTarget = await resolveSummaryTarget({ model: fallback });
+											failureMessage = undefined;
+											continue;
+										} catch (fallbackError) {
+											logError("agent.compaction", fallbackError, { fallback });
+										}
+									}
+								}
 							}
 						}
 						const failure = { type: "compaction" as const, status: "failed" as const, model: summaryTarget.summaryBareModel, thinkingLevel: summaryTarget.summaryThinkingLevel, error: failureMessage };
