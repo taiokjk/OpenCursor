@@ -111,7 +111,7 @@ export type UiPrefs = { chatTextSize: string; motion?: "full" | "system" | "redu
 /** A subagent team as shown in the composer's Project-mode picker. */
 export type TeamInfo = { id: string; name: string; description: string; members: string[] };
 export type InMessage =
-  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy; allowModelOutputEdits?: boolean }
+  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; pausedConvIds?: [string, "pending" | "paused"][]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy; allowModelOutputEdits?: boolean }
   | { type: "workflowState"; queues: Record<string, QueuedMessage[]>; steeringQueues?: Record<string, QueuedMessage[]>; goals: Record<string, ConversationGoal> }
   | { type: "queueSteeringResult"; convId: string; requestId: string; accepted: boolean }
   | { type: "requestAccepted"; requestId: string; convId: string; created: boolean }
@@ -121,6 +121,7 @@ export type InMessage =
   | { type: "configState"; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; uiPrefs?: UiPrefs; approvalPolicy?: ApprovalPolicy }
   | { type: "modelsFetched"; models: string[]; modelList?: ModelDef[] }
   | { type: "modelSelected"; model: string }
+  | { type: "runPause"; convId: string; state: "off" | "pending" | "paused" }
   | { type: "conversations"; list: ConversationSummary[]; activeId?: string; runningConvIds?: string[] }
   | { type: "loadConversation"; activeId?: string; turns: Turn[]; personaId?: string; selectedModel?: string; mode?: Mode; usedTokens?: number; running?: boolean; workspaceRoot?: string; allowModelOutputEdits?: boolean }
   | { type: "modelOutputEdited"; convId: string; turns: Turn[] }
@@ -189,6 +190,7 @@ export type OutMessage =
   | { type: "setModelOutputEditing"; convId: string; enabled: boolean }
   | { type: "editModelOutput"; convId: string; turnIndex: number; blockIndex: number; kind: "text" | "thinking" | "steering"; previousText: string; text: string }
   | { type: "cancelRun"; convId?: string }
+  | { type: "setPause"; convId?: string; paused: boolean }
   | { type: "cancelSubagent"; callId: string; reason?: "timeout" | "user" }
   | { type: "answerQuestion"; callId: string; answers: Record<string, string[]> }
   | { type: "resolveApproval"; requestId: string; approve?: boolean; pattern?: string; addPattern?: "allow" | "deny"; setMode?: ApprovalMode }

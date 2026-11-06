@@ -926,6 +926,52 @@ describe("host-owned transcripts and model output edits", () => {
     expect((s as RunSession).compactionWaiters?.size).toBe(0);
   });
 
+  it("pauses at the next boundary, blocks there, and resumes", async () => {
+    const { host, a } = await fixture();
+    const s = session();
+    host._sessions.set(a.id, s);
+    const posted: unknown[] = [];
+    host._view = { webview: { postMessage: (m: unknown) => { posted.push(m); return true; } } };
+    // Without a pause request the boundary is free.
+    await host._waitIfPaused(a.id, s, s.abort.signal);
+    host._setPaused(a.id, true);
+    expect(posted).toEqual([{ type: "runPause", convId: a.id, state: "pending" }]);
+    let released = false;
+    const blocked = host._waitIfPaused(a.id, s, s.abort.signal).then(() => { released = true; });
+    await Promise.resolve();
+    expect(released).toBe(false);
+    expect(posted.at(-1)).toEqual({ type: "runPause", convId: a.id, state: "paused" });
+    // A second boundary (e.g. a subagent) blocks on the same pause.
+    let secondReleased = false;
+    const second = host._waitIfPaused(a.id, s, s.abort.signal).then(() => { secondReleased = true; });
+    host._setPaused(a.id, false);
+    await Promise.all([blocked, second]);
+    expect(released && secondReleased).toBe(true);
+    expect(posted.at(-1)).toEqual({ type: "runPause", convId: a.id, state: "off" });
+    expect((s as RunSession).pauseWaiters?.size).toBe(0);
+  });
+
+  it("releases a paused boundary when the run is stopped", async () => {
+    const { host, a } = await fixture();
+    const s = session();
+    host._sessions.set(a.id, s);
+    host._setPaused(a.id, true);
+    const wait = host._waitIfPaused(a.id, s, s.abort.signal);
+    s.abort.abort();
+    await expect(wait).resolves.toBeUndefined();
+    expect((s as RunSession).pauseWaiters?.size).toBe(0);
+  });
+
+  it("cancels a pending pause before any boundary is reached", async () => {
+    const { host, a } = await fixture();
+    const s = session();
+    host._sessions.set(a.id, s);
+    host._setPaused(a.id, true);
+    host._setPaused(a.id, false);
+    await host._waitIfPaused(a.id, s, s.abort.signal);
+    expect((s as RunSession).pause).toBeUndefined();
+  });
+
   it("rejects a paused compaction when the run is stopped", async () => {
     const { host } = await fixture();
     const s = session();

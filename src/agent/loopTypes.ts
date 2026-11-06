@@ -96,6 +96,12 @@ export interface RunAgentOptions {
 	waitForQuotaReset?: (resumeAt: number, signal: AbortSignal, callId?: string) => Promise<"timer" | "manual" | { action: "manual"; model?: string }>;
 	/** Pause after a failed context summary until the user retries or accepts trimming. Absent = trim immediately. */
 	waitForCompactionDecision?: (signal: AbortSignal, callId?: string) => Promise<CompactionDecision>;
+	/**
+	 * Called at safe boundaries (before each step, before each tool call). Resolves
+	 * immediately unless the user paused the run; then it resolves on resume or abort.
+	 * It never rejects, so callers keep their normal abort handling.
+	 */
+	waitIfPaused?: (signal: AbortSignal, callId?: string) => Promise<void>;
 	onAfterRun?: () => void;
 	/** Blocking before-shell hook: resolves with a block reason to veto the command. */
 	onBeforeShell?: (command: string, signal?: AbortSignal) => Promise<string | undefined> | void;

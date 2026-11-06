@@ -900,6 +900,19 @@ describe("production chat application lifecycle", () => {
     expect(vscode.postMessage).toHaveBeenCalledWith({ type: "resolveCompaction", action: "retry", thinkingLevel: "high" });
   });
 
+  it("follows the host's pause confirmation in the status line and clears it when the run ends", () => {
+    initial({ activeId: "A" });
+    message({ type: "runPause", convId: "A", state: "pending" });
+    expect(container.textContent).not.toContain("Paused");
+    message({ type: "runPause", convId: "A", state: "paused" });
+    expect(container.textContent).toContain("Paused");
+    message({ type: "runPause", convId: "A", state: "off" });
+    expect(container.textContent).not.toContain("Paused");
+    message({ type: "runPause", convId: "A", state: "paused" });
+    message({ type: "agentEvent", convId: "A", event: { type: "run-status", status: "cancelled" } });
+    expect(container.textContent).not.toContain("Paused");
+  });
+
   it("continues with trimming from a paused summary failure", () => {
     initial({ activeId: "A" });
     message({ type: "agentEvent", convId: "A", event: { type: "compaction", status: "failed", model: "m", thinkingLevel: "low", error: "boom", paused: true } });

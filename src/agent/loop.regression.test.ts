@@ -848,6 +848,79 @@ describe("runAgent context consumption", () => {
 		expectFinished(events, "Continued after retry.", 3);
 	});
 
+	it("waits at step and tool boundaries while paused, and Stop releases it", async () => {
+		const gates: Array<() => void> = [];
+		let requestsWhenFirstHeld = -1;
+		const first = run([
+			toolTurn(call("Read", { path: "a.ts" }, "a"), call("Read", { path: "b.ts" }, "b")),
+			answer("Done after pause."),
+		], {
+			prompt: "Read both.",
+			waitIfPaused: () => {
+				if (requestsWhenFirstHeld < 0) requestsWhenFirstHeld = fixture.requests.length;
+				return new Promise<void>((resolve) => gates.push(resolve));
+			},
+		});
+		const release = async () => {
+			for (let i = 0; i < 400; i++) {
+				while (gates.length) gates.shift()!();
+				if (await Promise.race([first.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 2))])) return;
+			}
+		};
+		await release();
+		const { events } = await first;
+		// The very first boundary held the run before any model request.
+		expect(requestsWhenFirstHeld).toBe(0);
+		expectFinished(events, "Done after pause.", 2);
+	});
+
+	it("does not start the next tool while paused between tool calls", async () => {
+		const order: string[] = [];
+		let held = false;
+		let gate: (() => void) | undefined;
+		const first = run([
+			toolTurn(call("Shell", { command: "echo one" }, "one"), call("Shell", { command: "echo two" }, "two")),
+			answer("Both done."),
+		], {
+			prompt: "Run both.",
+			onBeforeShell: (command) => { order.push(command); },
+			waitIfPaused: () => {
+				// Hold only the boundary that precedes the second tool.
+				if (order.length === 1 && !held) {
+					held = true;
+					return new Promise<void>((resolve) => { gate = resolve; });
+				}
+				return Promise.resolve();
+			},
+		});
+		for (let i = 0; i < 400 && !gate; i++) await new Promise((r) => setTimeout(r, 2));
+		expect(order).toEqual(["echo one"]);
+		gate!();
+		const { events } = await first;
+		expect(order).toEqual(["echo one", "echo two"]);
+		expectFinished(events, "Both done.", 2);
+	});
+
+	it("turns the remaining tools into cancellations when Stop arrives while paused", async () => {
+		const ac = new AbortController();
+		let gate: (() => void) | undefined;
+		const first = run([
+			toolTurn(call("Read", { path: "a.ts" }, "a")),
+		], {
+			prompt: "Read it.",
+			signal: ac.signal,
+			waitIfPaused: (signal) => new Promise<void>((resolve) => {
+				gate = resolve;
+				signal.addEventListener("abort", () => resolve(), { once: true });
+			}),
+		});
+		for (let i = 0; i < 400 && !gate; i++) await new Promise((r) => setTimeout(r, 2));
+		ac.abort();
+		const { events } = await first;
+		expect(events).toContainEqual({ type: "run-status", status: "cancelled" });
+		expect(fixture.requests).toHaveLength(0);
+	});
+
 	it("falls back to Claude Sonnet 5.5 automatically before pausing", async () => {
 		const history = olderReadHistory("Inspect dependency initialization.", "DETAIL_FOR_FALLBACK");
 		const summary = "Recovered by the fallback model.";

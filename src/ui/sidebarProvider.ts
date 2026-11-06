@@ -710,6 +710,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           if (id) await this._stopRun(id);
           break;
         }
+        case "setPause":
+          this._setPaused(data.convId, data.paused === true);
+          break;
         case "cancelSubagent":
           // callId is globally unique; abort tool/subagent and settle the card now.
           for (const [cid, s] of this._sessions) {
@@ -1185,6 +1188,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       teams: this._teamSummaries(features),
       activeTeamIds: features.activeTeamIds ?? [],
       runningConvIds: [...this._sessions.keys()],
+      pausedConvIds: [...this._sessions].filter(([, s]) => s.pause).map(([id, s]) => [id, s.pause]),
       workspaceState: this._store.getWorkspaceState(),
       uiPrefs: {
         chatTextSize: features.chatTextSize ?? "default",
@@ -1489,6 +1493,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       };
       waiters.set(key, settle);
       signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private _postPause(convId: string, state: "off" | "pending" | "paused"): void {
+    this._view?.webview.postMessage({ type: "runPause", convId, state });
+  }
+
+  /** Request a pause or resume. A pause takes effect at the run's next safe boundary. */
+  private _setPaused(convId: string | null | undefined, paused: boolean): void {
+    const id = convId ?? this._activeId;
+    const session = id ? this._sessions.get(id) : undefined;
+    if (!id || !session || session.settled || session.abort.signal.aborted) return;
+    if (paused) {
+      if (session.pause) return;
+      session.pause = "pending";
+      this._postPause(id, "pending");
+      return;
+    }
+    if (!session.pause) return;
+    session.pause = undefined;
+    for (const release of [...session.pauseWaiters ?? []]) release();
+    this._postPause(id, "off");
+  }
+
+  /** Block at a safe boundary while the run is paused; always resolves, on resume or abort. */
+  private _waitIfPaused(convId: string, session: RunSession, signal: AbortSignal): Promise<void> {
+    if (!session.pause || signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiters = session.pauseWaiters ?? (session.pauseWaiters = new Set());
+      const release = () => {
+        waiters.delete(release);
+        signal.removeEventListener("abort", release);
+        resolve();
+      };
+      waiters.add(release);
+      signal.addEventListener("abort", release, { once: true });
+      if (session.pause === "pending") {
+        session.pause = "paused";
+        this._postPause(convId, "paused");
+      }
     });
   }
 
@@ -2578,6 +2622,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         askUser: (callId, _header, _questions, sig) => this._askUser(session, callId, sig),
         waitForQuotaReset: (resumeAt, sig, callId) => this._waitForQuotaReset(session, resumeAt, sig, callId),
         waitForCompactionDecision: (sig, callId) => this._waitForCompactionDecision(session, sig, callId),
+        waitIfPaused: (sig) => this._waitIfPaused(convId, session, sig),
         onAfterRun: () => runHooks(features.hooks, "afterRun", { prompt: text }),
         onBeforeShell: (command, hookSignal) => runBlockingHooks(features.hooks, "beforeShell", { command }, undefined, hookSignal ?? session.abort.signal),
         onAfterEdit: (path) => runHooks(features.hooks, "afterEdit", { path }),

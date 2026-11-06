@@ -993,6 +993,8 @@ interface ChatSession {
   turns: Turn[];
   running: boolean;
   status: { text: string; error?: boolean };
+  /** Host-confirmed pause: requested ("pending") or blocked at a boundary ("paused"). */
+  pause?: "pending" | "paused";
   /** Tokens used in the last request (context consumption). */
   usedTokens?: number;
 }
@@ -1240,6 +1242,7 @@ export function App() {
   const turns = active.turns;
   const isRunning = active.running;
   const status = active.status;
+  const pause = isRunning ? active.pause : undefined;
   const allowOutputEdits = !!activeId && conversations.some((c) => c.id === activeId && c.allowModelOutputEdits);
   const setOutputEditing = (enabled: boolean) => {
     if (!activeId) return;
@@ -1502,6 +1505,7 @@ export function App() {
       } else if (!live && s.running) {
         // Host no longer has this run (stop, crash, IDE reopen) — clear Working.
         s.running = false;
+        s.pause = undefined;
         s.status = { text: "" };
         s.turns = forceSettleOpenWork(closeTrailingThinking(s.turns), "cancelled");
       }
@@ -1563,6 +1567,8 @@ export function App() {
           setSelectedModel(resolvedModel);
           seedSession(msg.activeId, msg.turns || [], msg.usedTokens, msg.runningConvIds?.includes(msg.activeId ?? "") ?? false);
           markRunning(msg.runningConvIds);
+          for (const s of sessionsRef.current.values()) s.pause = undefined;
+          for (const [id, state] of msg.pausedConvIds ?? []) sessionFor(id).pause = state;
           setActiveId(msg.activeId);
           setPersonas(msg.personas || []);
           setPersonaId(msg.activePersonaId || "default");
@@ -1640,6 +1646,16 @@ export function App() {
           draftsRef.current.set(key, msg.draft);
           if (activeIdRef.current === msg.convId) setDraft(msg.draft);
           setDraftTick();
+          break;
+        }
+        case "runPause": {
+          const s = sessionFor(msg.convId);
+          s.pause = msg.state === "off" ? undefined : msg.state;
+          if (s.running && !s.status.error) {
+            if (msg.state === "paused") s.status = { text: "Paused" };
+            else if (msg.state === "off" && s.status.text === "Paused") s.status = { text: "Planning next moves" };
+          }
+          if (msg.convId === activeIdRef.current) force();
           break;
         }
         case "modelSelected": {
@@ -1777,6 +1793,7 @@ export function App() {
             if (settled) {
               const wasRunning = s.running;
               s.running = false;
+              s.pause = undefined;
               if (wasRunning && ev.status === "finished" && uiPrefsRef.current.completionSound) playCompletionSound();
               // Close open thinking + cancel any still-spinning tools/subagents.
               s.turns = forceSettleOpenWork(
@@ -2101,6 +2118,7 @@ export function App() {
     onSubmit(text, attachments);
   });
   const composerOnCancel = useStableCallback(() => post({ type: "cancelRun", convId: activeId }));
+  const composerOnTogglePause = useStableCallback(() => post({ type: "setPause", convId: activeId, paused: !pause }));
 
   return (
     <ModelPickerContext.Provider value={{ models, modelList, selectedModel }}>
@@ -2443,6 +2461,8 @@ export function App() {
           onTabDraft={composerOnTabDraft}
           onSubmit={composerOnSubmit}
           onCancel={composerOnCancel}
+          pause={pause}
+          onTogglePause={composerOnTogglePause}
           submitWithCtrlEnter={uiPrefs.submitWithCtrlEnter}
         />
       </div>

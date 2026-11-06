@@ -750,6 +750,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				changeOwner,
 				approve,
 				resolveModelOptions: opts.resolveModelOptions,
+				waitIfPaused: opts.waitIfPaused ? (sig) => opts.waitIfPaused!(sig, callId) : undefined,
 				waitForQuotaReset: opts.waitForQuotaReset
 					? async (resumeAt, sig) => {
 						const res = await opts.waitForQuotaReset!(resumeAt, sig, callId);
@@ -1219,6 +1220,12 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				hitStepLimit = true;
 				break;
 			}
+			if (signal.aborted) {
+				emitSettled("cancelled");
+				return;
+			}
+			// Steering sent while paused is applied right after resuming.
+			await opts.waitIfPaused?.(signal);
 			if (signal.aborted) {
 				emitSettled("cancelled");
 				return;
@@ -2052,6 +2059,9 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 				await Promise.all(workers);
 			};
 			for (let i = 0; i < parsed.length;) {
+				// Tools already running finish; the next one waits here. A Stop while
+				// paused falls through to exec's "cancelled before tool execution".
+				await opts.waitIfPaused?.(signal);
 				if (!isReadOnly(i)) { await wrapExec(i++); continue; }
 				const run: number[] = [];
 				while (i < parsed.length && isReadOnly(i)) run.push(i++);

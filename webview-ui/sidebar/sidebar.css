@@ -4179,6 +4179,10 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	background: var(--primary-bg);
 	color: var(--primary-fg);
 }
+.attach-btn.pause-btn.active { background: var(--surface-2); color: var(--fg); }
+.attach-btn.pause-btn[aria-label="Cancel pause"] { animation: pause-pending 1.2s ease-in-out infinite; }
+@keyframes pause-pending { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .attach-btn.pause-btn[aria-label="Cancel pause"] { animation: none; } }
 .send-btn.stop svg {
 	width: 16px;
 	height: 16px;

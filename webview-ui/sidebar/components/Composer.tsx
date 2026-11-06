@@ -900,6 +900,8 @@ export function Composer({
   focusKey,
   onSubmit,
   onCancel,
+  pause,
+  onTogglePause,
   initialText,
   initialAttachments,
   editing,
@@ -936,6 +938,9 @@ export function Composer({
   focusKey?: string;
   onSubmit: (text: string, attachments: Attachment[]) => void;
   onCancel: () => void;
+  /** "pending" = pause requested, waiting for a safe boundary; "paused" = blocked there. */
+  pause?: "pending" | "paused";
+  onTogglePause?: () => void;
   /** Edit mode: seed the editor with an existing message + attachments. */
   initialText?: string;
   initialAttachments?: Attachment[];
@@ -1738,6 +1743,15 @@ export function Composer({
             {editing && (
               <button className="attach-btn" title="Cancel edit (Esc)" onClick={() => onCancelEdit?.()}>
                 <Icon name="close" size={15} />
+              </button>
+            )}
+            {isRunning && !editing && onTogglePause && (
+              <button className={"attach-btn pause-btn" + (pause ? " active" : "")} type="button"
+                title={pause === "paused" ? "Resume" : pause === "pending" ? "Pausing after the current step — click to cancel" : "Pause after the current step"}
+                aria-label={pause === "paused" ? "Resume" : pause === "pending" ? "Cancel pause" : "Pause"}
+                aria-pressed={!!pause}
+                onClick={onTogglePause}>
+                <Icon name={pause === "paused" ? "play" : "pause"} size={pause === "paused" ? 18 : 15} />
               </button>
             )}
             <button

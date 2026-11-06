@@ -43,6 +43,10 @@ export interface RunSession {
   quotaWaiters?: Set<(opts?: { callId?: string; model?: string }) => void>;
   /** Runs paused on a failed context summary, keyed by subagent callId ("" = parent run). */
   compactionWaiters?: Map<string, (decision: CompactionDecision) => void>;
+  /** User-requested pause: "pending" until a run reaches a safe boundary and blocks there. */
+  pause?: "pending" | "paused";
+  /** Boundary waiters released on resume or abort. */
+  pauseWaiters?: Set<() => void>;
   /** Authoritative live UI turns, owned by the host so the run survives any webview churn. */
   turns: Turn[];
   /** Live model transcript and checkpoint, saved alongside the rendered turns. */
