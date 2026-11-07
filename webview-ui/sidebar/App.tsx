@@ -406,8 +406,8 @@ const UserMessage = React.memo(function UserMessage({ turn, index, isRunning, on
 });
 
 /** An assistant response with its actions; memoized like {@link UserMessage}. */
-const AssistantMessage = React.memo(function AssistantMessage({ turn, index, isRunning, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals, onRetry }: {
-  turn: AssistantTurn; index: number; isRunning: boolean; running: boolean; phase?: string;
+const AssistantMessage = React.memo(function AssistantMessage({ turn, index, isRunning, running, phase, waitingTasks, onImplement, onOpenSubagent, approvals, taskApprovals, onRetry }: {
+  turn: AssistantTurn; index: number; isRunning: boolean; running: boolean; phase?: string; waitingTasks?: WaitingTask[];
   onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
   approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
   onRetry?: (index: number) => void;
@@ -418,7 +418,7 @@ const AssistantMessage = React.memo(function AssistantMessage({ turn, index, isR
         <Icon name="bot" /> Agent
       </div>
       <div className="bubble">
-        <AssistantContent turn={turn} turnIndex={index} running={running} phase={phase}
+        <AssistantContent turn={turn} turnIndex={index} running={running} phase={phase} waitingTasks={waitingTasks}
           onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvals} taskApprovals={taskApprovals} />
       </div>
       <MessageActions variant="assistant" text={responseText(turn.blocks)} disabled={isRunning}
@@ -829,8 +829,8 @@ function EditableOutput({ turn, turnIndex, blockIndex, kind, render }: {
   return <div className="editable-output editable-text">{render()}{action}</div>;
 }
 
-const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex, running, phase, onImplement, onOpenSubagent, approvals, taskApprovals }: {
-  turn: AssistantTurn; turnIndex?: number; running: boolean; phase?: string;
+const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex, running, phase, waitingTasks, onImplement, onOpenSubagent, approvals, taskApprovals }: {
+  turn: AssistantTurn; turnIndex?: number; running: boolean; phase?: string; waitingTasks?: WaitingTask[];
   onImplement?: (path: string) => void; onOpenSubagent?: (callId: string) => void;
   approvals: Record<string, ApprovalRequestInfo>; taskApprovals: Record<string, ApprovalRequestInfo[]>;
 }) {
@@ -871,8 +871,37 @@ const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex,
     waitingStartedAt={turn.waitingStartedAt} waitedMs={turn.waitedMs} durationMs={turn.durationMs}
     hasActivity={activity.length > 0} forceOpen={forceOpen} activity={render(activity, running)}
     conclusion={conclusion.length ? render(conclusion, false) : undefined}
-    status={phase ? <div className="phase-row"><ThinkingStatus text={phase} /></div> : undefined} />;
+    status={phase ? <div className="phase-row"><ThinkingStatus text={phase} />{waitingTasks?.length ? <WaitingTaskList tasks={waitingTasks} /> : null}</div> : undefined} />;
 });
+
+interface WaitingTask { id: string; title: string }
+
+/** Scroll the chat to a task's card (the subagent card keyed by its call id) and flash it. */
+function revealTask(id: string) {
+  const el = Array.from(document.querySelectorAll<HTMLElement>("[data-call-id]")).find(node => node.dataset.callId === id);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.remove("task-highlight");
+  void el.offsetWidth;
+  el.classList.add("task-highlight");
+  window.setTimeout(() => el.classList.remove("task-highlight"), 2500);
+}
+
+function WaitingTaskList({ tasks }: { tasks: WaitingTask[] }) {
+  const [open, setOpen] = React.useState(false);
+  return <div className="waiting-tasks">
+    <button type="button" className="waiting-tasks-toggle" aria-expanded={open} onClick={() => setOpen(o => !o)}>
+      {open ? "Hide" : "Show"} {tasks.length} pending task{tasks.length === 1 ? "" : "s"}
+    </button>
+    {open && <ul className="waiting-tasks-list">
+      {tasks.map(task => <li key={task.id}>
+        <button type="button" className="waiting-task" title="Show in chat" onClick={() => revealTask(task.id)}>
+          <Icon name="task" size={12} /> {task.title}
+        </button>
+      </li>)}
+    </ul>}
+  </div>;
+}
 
 function SubagentChat({
   block,
@@ -992,7 +1021,7 @@ function SubagentChat({
 interface ChatSession {
   turns: Turn[];
   running: boolean;
-  status: { text: string; error?: boolean };
+  status: { text: string; error?: boolean; tasks?: WaitingTask[] };
   /** Host-confirmed pause: requested ("pending") or blocked at a boundary ("paused"). */
   pause?: "pending" | "paused";
   /** Tokens used in the last request (context consumption). */
@@ -1815,7 +1844,7 @@ export function App() {
             else if (ev.type === "retry") s.status = { text: `Retrying (${ev.attempt}/${ev.max})…` };
             else if (ev.type === "usage" && (!ev.source || ev.source === "parent")) s.usedTokens = ev.totalTokens;
             else if (ev.type === "compaction") s.status = { text: ev.status === "running" ? "Summarizing conversation" : ev.paused ? "Waiting for your decision" : "Planning next moves" };
-            else if (ev.type === "shell-notify") s.status = { text: ev.message };
+            else if (ev.type === "shell-notify") s.status = { text: ev.message, tasks: ev.tasks };
             else if (ev.type === "error") {
               // The host records the error block in its own transcript.
               s.status = { text: "Error: " + ev.message, error: true };
@@ -2344,6 +2373,7 @@ export function App() {
                   <AssistantMessage key={index} turn={turn} index={index} isRunning={isRunning}
                     running={isRunning && (turn === turns[turns.length - 1] || hasLiveWork(turn.blocks))}
                     phase={isRunning && turn === turns[turns.length - 1] && !status.error ? status.text : undefined}
+                    waitingTasks={isRunning && turn === turns[turns.length - 1] && !status.error ? status.tasks : undefined}
                     onImplement={onImplement} onOpenSubagent={onOpenSubagent} approvals={approvalsByCall} taskApprovals={approvalsByTask}
                     onRetry={group[0].turn.role === "user" ? onRetryResponse : undefined} />
                 )

@@ -39,7 +39,7 @@ export type AgentEvent =
   | { type: "run-result"; text: string; durationMs: number }
   | { type: "subagent-event"; callId: string; event: AgentEvent }
   | { type: "mode-changed"; mode: Mode }
-  | { type: "shell-notify"; message: string }
+  | { type: "shell-notify"; message: string; tasks?: { id: string; title: string }[] }
   | { type: "retry"; attempt: number; max: number; delayMs: number; resumeAt?: number; error: string }
   | { type: "compaction"; status: "running" | "done" | "failed"; summary?: string; model?: string; thinkingLevel?: string; error?: string; paused?: boolean }
   | { type: "max-steps"; steps: number }

@@ -1727,6 +1727,27 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	background: var(--surface-2);
 	border-color: var(--line);
 }
+.subagent-card.task-highlight {
+	animation: task-highlight 2.5s var(--ease);
+}
+@keyframes task-highlight {
+	0%, 60% { border-color: var(--control-focus-border); box-shadow: 0 0 0 2px var(--control-focus-border); }
+	100% { box-shadow: 0 0 0 0 transparent; }
+}
+.waiting-tasks { margin-top: var(--sp-2); }
+.waiting-tasks-toggle, .waiting-task {
+	background: none;
+	border: none;
+	color: var(--fg-muted, inherit);
+	cursor: pointer;
+	padding: 2px 0;
+	font: inherit;
+	text-decoration: underline;
+	text-align: left;
+}
+.waiting-tasks-list { list-style: none; margin: var(--sp-2) 0 0; padding: 0; }
+.waiting-task { display: inline-flex; align-items: center; gap: var(--sp-2); text-decoration: none; }
+.waiting-task:hover { text-decoration: underline; }
 .subagent-card:focus-visible {
 	outline: 1px solid var(--control-focus-border);
 	outline-offset: 2px;

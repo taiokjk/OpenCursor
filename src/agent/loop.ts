@@ -1098,7 +1098,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 		const awaitPendingBg = async (): Promise<boolean> => {
 			if (!bgPending()) return false;
 			if (flushSettledBg()) return true;
-			emit({ type: "shell-notify", message: `Waiting for a result from ${background.active} background task(s)…` });
+			emit({ type: "shell-notify", message: `Waiting for a result from ${background.active} background task(s)…`, tasks: background.activeTasks() });
 			await raceAbort(background.waitForNext());
 			if (signal.aborted) background.cancelAll();
 			flushSettledBg();

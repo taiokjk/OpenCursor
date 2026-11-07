@@ -428,7 +428,7 @@ function SubagentCard({ block, onOpen, awaitingApproval }: { block: ToolBlock; o
   const [resumeModel, setResumeModel] = React.useState<string>("");
 
   return (
-    <div className={"subagent-card" + (awaitingApproval ? " needs-approval" : "")} onClick={() => onOpen?.(block.callId)} role="button" tabIndex={0} title="Open subagent"
+    <div className={"subagent-card" + (awaitingApproval ? " needs-approval" : "")} data-call-id={block.callId} onClick={() => onOpen?.(block.callId)} role="button" tabIndex={0} title="Open subagent"
       onKeyDown={(event) => {
         if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
           event.preventDefault(); event.currentTarget.click();

@@ -22,6 +22,9 @@ export class BackgroundTasks {
     return [...this.jobs].find(([, job]) => job.key === key && !job.result)?.[0];
   }
   get active(): number { return [...this.jobs.values()].filter(job => !job.result).length; }
+  activeTasks(): { id: string; title: string }[] {
+    return [...this.jobs].filter(([, job]) => !job.result).map(([id, job]) => ({ id, title: job.title }));
+  }
   get pending(): boolean { return [...this.jobs.values()].some(job => !job.reported); }
 
   add(id: string, key: string, title: string, work: Promise<string>, cancel: () => void): void {
