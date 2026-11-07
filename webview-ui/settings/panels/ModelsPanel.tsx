@@ -25,6 +25,7 @@ import {
   ProviderKind,
 } from "../features";
 import { Toggle } from "./Toggle";
+import { sortModels } from "../../../src/shared/modelSort";
 
 // Default and custom models render as flat rows with an enable toggle only;
 // their sampling options are configured in the chat model picker.
@@ -304,8 +305,11 @@ export function ModelsPanel({
     }
     for (const m of modelList) if (m.providerId === providerId) push(m);
     for (const m of customs) if (m.providerId === providerId) push(m);
-    for (const id of fetchedExtra[providerId] || []) push({ id, name: id, kind });
-    return list;
+    for (const id of fetchedExtra[providerId] || []) {
+      const cat = catalog.find((m) => m.id === id && (Array.isArray(m.kind) ? m.kind.includes(kind) : m.kind === kind));
+      push(cat ?? { id, name: id, kind });
+    }
+    return sortModels(list);
   };
 
   const refreshProvider = (p: ProviderConfig) => {
@@ -384,7 +388,7 @@ export function ModelsPanel({
         ? "Models from your signed-in account. Toggle to show them in the chat picker."
         : "Not connected — sign in from Providers → OAuth Accounts. Catalog models are shown for reference.",
       connected,
-      models: list,
+      models: sortModels(list),
       addTarget: { providerId: id, kind },
       onRefresh: () => { startRefreshing(id); fetchModels(); },
       refreshing: refreshing.has(id),
@@ -397,7 +401,7 @@ export function ModelsPanel({
     title: "Local · llama.cpp",
     subtitle: "GGUF models managed in the llama.cpp tab. Selecting one in chat auto-loads its server.",
     connected: llamacppStatus.installed && (features.llamacppModels || []).length > 0,
-    models: (features.llamacppModels || []).map((m) => ({ id: m.id, name: m.name, kind: "llamacpp" as ProviderKind })),
+    models: sortModels((features.llamacppModels || []).map((m) => ({ id: m.id, name: m.name, kind: "llamacpp" as ProviderKind }))),
     onRefresh: () => { startRefreshing("local:llamacpp"); vscode.postMessage({ type: "llamacppGet" }); },
     refreshing: refreshing.has("local:llamacpp"),
     local: true,
@@ -409,7 +413,7 @@ export function ModelsPanel({
     title: "Local · Ollama",
     subtitle: "Models pulled in the Ollama tab, served at localhost:11434.",
     connected: (ollamaModels || []).length > 0,
-    models: (ollamaModels || []).map((m) => ({ id: m.name, name: m.name, kind: "ollama" as ProviderKind })),
+    models: sortModels((ollamaModels || []).map((m) => ({ id: m.name, name: m.name, kind: "ollama" as ProviderKind }))),
     onRefresh: () => { startRefreshing("local:ollama"); vscode.postMessage({ type: "ollamaGet" }); },
     refreshing: refreshing.has("local:ollama"),
     local: true,

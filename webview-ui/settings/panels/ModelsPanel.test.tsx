@@ -222,4 +222,51 @@ describe("current catalog in the actual Models panel", () => {
     expect(container.textContent).toContain("gemini-3.8-flash-high");
     expect(container.textContent).not.toContain("gemini-3.8-flash-medium");
   });
+
+  it("orders provider models best-to-worst with same-family tiers together and no position jumps on refresh", () => {
+    const oauthStatus: OAuthStatus = { accounts: [{ id: "google", kind: "antigravity" }], errors: {} };
+    const initialList: ModelDef[] = [
+      { id: "claude-sonnet-5-5-low", name: "Claude Sonnet 5.5 (Low)", kind: "antigravity", providerId: "oauth:antigravity" },
+      { id: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium)", kind: "antigravity", providerId: "oauth:antigravity" },
+      { id: "claude-opus-5-5-medium", name: "Claude Opus 5.5 (Medium)", kind: "antigravity", providerId: "oauth:antigravity" },
+      { id: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)", kind: "antigravity", providerId: "oauth:antigravity" },
+      { id: "claude-opus-5-5-high", name: "Claude Opus 5.5 (High)", kind: "antigravity", providerId: "oauth:antigravity" },
+      { id: "claude-sonnet-5-5-high", name: "Claude Sonnet 5.5 (High)", kind: "antigravity", providerId: "oauth:antigravity" },
+      { id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", kind: "antigravity", providerId: "oauth:antigravity" },
+      { id: "gemini-4-argon-high", name: "Gemini 4 Argon (High)", kind: "antigravity", providerId: "oauth:antigravity" },
+    ];
+    act(() => root.render(<Harness key="antigravity-order" providers={[]} oauthStatus={oauthStatus} modelList={initialList} />));
+    search("5");
+    search("");
+    // Expand the Google Antigravity section to inspect rendered row order.
+    const head = cardFor("Google Antigravity").querySelector<HTMLElement>(".fc-head")!;
+    act(() => head.click());
+    const renderedIds = () =>
+      [...cardFor("Google Antigravity").querySelectorAll<HTMLElement>(".model-row .row-desc")].map((el) => el.textContent);
+    const expectedOrder = [
+      "claude-opus-5-5-high",
+      "claude-opus-5-5-medium",
+      "claude-sonnet-5-5-high",
+      "claude-sonnet-5-5-low",
+      "gemini-4-argon-high",
+      "gemini-4-argon-medium",
+      "gemini-3.8-flash-high",
+      "gemini-3.8-flash-low",
+    ];
+    expect(renderedIds()).toEqual(expectedOrder);
+
+    // Dispatching a refresh with reversed model order must keep the exact same visual order.
+    act(() =>
+      window.dispatchEvent(
+        new window.MessageEvent("message", {
+          data: {
+            type: "modelsFetched",
+            providerId: "oauth:antigravity",
+            models: [...expectedOrder].reverse(),
+          },
+        })
+      )
+    );
+    expect(renderedIds()).toEqual(expectedOrder);
+  });
 });

@@ -14,6 +14,7 @@ import { ProviderIcon } from "../../shared/ProviderIcon";
 import { ProviderPickerDialog, providerLabel, type ProviderChoice, type ProviderPickerScope } from "./ProviderPickerDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { vscode } from "../../shared/vscode";
+import { sortModels } from "../../../src/shared/modelSort";
 import {
   BALANCE_OPTIONS,
   FeatureConfig,
@@ -190,7 +191,7 @@ export function OAuthAccountCard({ account, defaultOpen, refreshToken = 0, group
         window.clearTimeout(active.timer);
         limitsRequest.current = undefined;
         if (!m.error) {
-          setLimits(m.limits || []);
+          setLimits(sortModels(m.limits || []));
           setResetCredits(m.resetCredits);
           setResetNeedsRefresh(false);
         }

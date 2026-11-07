@@ -16,6 +16,7 @@ import { defaultAnthropicMaxTokens } from "./providerLimits";
 import { applyAnthropicReasoning, needsContext1mBeta } from "./provider/anthropicReasoning";
 import { applyAnthropicSpeed } from "./provider/anthropicSpeed";
 import { applyChatSpeed } from "../shared/modelSpeed";
+import { compareModels } from "../shared/modelSort";
 import { AnthropicUsageTracker } from "./anthropicUsage";
 import { toAnthropic } from "./provider/anthropicMessages";
 import { sseData } from "./provider/sse";
@@ -100,7 +101,7 @@ export async function listModels(apiBaseUrl: string, apiKey: string, anthropic?:
     const { listProviderAdapterModels } = await import("./oauth/providerTransport.js");
     const result = await listProviderAdapterModels(options.providerAdapterId, { apiKey }, { baseUrl: apiBaseUrl, signal: options.signal ?? AbortSignal.timeout(30_000) });
     options.onVerification?.(result.verified);
-    return result.models.map(id => ({ id }));
+    return result.models.map(id => ({ id })).sort(compareModels);
   }
   const useAnthropic = anthropic ?? isAnthropic(apiBaseUrl);
   if (useAnthropic && !apiKey) {
@@ -125,12 +126,12 @@ export async function listModels(apiBaseUrl: string, apiKey: string, anthropic?:
           return kinds.includes(kind);
         })
         .map((m) => ({ id: m.id }))
-        .sort((a, b) => a.id.localeCompare(b.id));
+        .sort(compareModels);
     }
     throw new ChatHTTPError(r.status, `models ${r.status}: ${safeProviderDetail(await r.text(), apiKey)}`, retryAfterMs(r));
   }
   const d = (await r.json()) as { data?: { id: string }[] };
-  return (d.data ?? []).map((m) => ({ id: m.id })).sort((a, b) => a.id.localeCompare(b.id));
+  return (d.data ?? []).map((m) => ({ id: m.id })).sort(compareModels);
 }
 
 function isAnthropic(apiBaseUrl: string): boolean {

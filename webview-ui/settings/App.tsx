@@ -18,6 +18,7 @@ import { CacheUsage } from "./CacheUsage";
 import { DocsSection, type DocSourceInfo, type DocsStatus } from "./DocsSection";
 import { ControlLabelContext, Toggle } from "./panels/Toggle";
 import { setMotionPreference, type MotionPreference } from "../shared/motionPreference";
+import { compareModels } from "../../src/shared/modelSort";
 
 interface Settings {
   model: string;
@@ -355,7 +356,7 @@ function UsagePanel({
     if (action === "refresh") setQuotaRefresh(value => value + 1);
     vscode.postMessage({ type: action === "refresh" ? "getUsage" : "resetUsage", requestId });
   };
-  const rows = Object.entries(usage).sort((a, b) => b[1].lastUsed - a[1].lastUsed);
+  const rows = Object.entries(usage).sort(([a], [b]) => compareModels(a, b));
   const totals = rows.reduce(
     (t, [, u]) => ({ p: t.p + u.promptTokens, c: t.c + u.completionTokens, r: t.r + u.requests }),
     { p: 0, c: 0, r: 0 }
