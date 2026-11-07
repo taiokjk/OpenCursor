@@ -134,6 +134,12 @@ type StoredConversation = Conversation & { bodyInFile?: true; openRun?: true };
 function hasOpenRun(turns: Turn[] | undefined): boolean {
   return !!turns?.some((turn) => turn.role === "assistant" && turn.startedAt != null && turn.endedAt == null);
 }
+/** A run ended on a plain assistant message (no pending tool calls) rather than being cut off. */
+function runFinishedNormally(conversation: Conversation): boolean {
+  const last = conversation.steps[conversation.steps.length - 1] as { kind?: string; calls?: unknown[] } | undefined;
+  if (!last) return true;
+  return last.kind === "assistant" && !(last.calls?.length);
+}
 function withoutBody(conversation: Conversation): Conversation {
   const result = { ...conversation } as Partial<Conversation>;
   delete result.steps; delete result.turns; delete result.contextState; delete result.runEvents;
@@ -496,11 +502,16 @@ export class ConversationStore {
 
   async recoverInterruptedRuns(): Promise<void> {
     // Only transcripts saved mid-run need reading; others stay on disk.
-    for (const id of [...this.cache.openRuns]) this.loadSafely(id);
+    // The Memento can lag behind the transcript file when the window reloads: the
+    // file may already be settled (cancelled) while the Memento still says the run
+    // was open and carries no queue entry. The flag is the only surviving evidence.
+    const flaggedOpen = new Set(this.cache.openRuns);
+    for (const id of flaggedOpen) this.loadSafely(id);
     const list = this.cache.conversations.map(conversation => ({ ...conversation }));
     let changed = false;
     const bodies: string[] = [];
     for (const conversation of list) {
+      const wasOpen = flaggedOpen.has(conversation.id) || (!this.cache.unloaded.has(conversation.id) && hasOpenRun(conversation.turns));
       if (!this.cache.unloaded.has(conversation.id) && hasOpenRun(conversation.turns)) {
         // A restarted host cannot know the exact interruption time. Use the
         // last saved snapshot instead of counting time while the IDE was shut.
@@ -513,6 +524,20 @@ export class ConversationStore {
         changed = true;
         return { ...item, status: "interrupted", error: "The extension restarted during this request. Resume to reconcile completed work before continuing." };
       });
+      if (wasOpen && !this.cache.unloaded.has(conversation.id)
+        && !conversation.queue.some((item) => item.status === "interrupted" || item.status === "failed")
+        && !runFinishedNormally(conversation)) {
+        const lastUser = [...conversation.turns].reverse().find((t): t is Extract<Turn, { role: "user" }> => t.role === "user" && !t.steering);
+        if (lastUser) {
+          conversation.queue.unshift({
+            id: randomUUID(), text: lastUser.text, attachments: lastUser.attachments as QueuedMessage["attachments"],
+            model: lastUser.model ?? conversation.model, mode: (lastUser.mode ?? conversation.mode) as Mode | undefined,
+            status: "interrupted", createdAt: Date.now(),
+            error: "The window reloaded during this request. Resume to continue remaining work.",
+          });
+          changed = true;
+        }
+      }
       if (conversation.steeringQueue?.length || conversation.steering?.length) {
         const ids = new Set(conversation.queue.map((item) => item.id));
         for (const item of conversation.steeringQueue ?? []) {

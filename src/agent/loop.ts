@@ -1427,6 +1427,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			// Persist received content even when the stream throws on Stop or disconnect.
 			let streamCompleted = false;
 			try {
+				let quotaWoke = false;
 				for (let quotaAttempt = 1; ; quotaAttempt++) {
 					try {
 						for await (const ev of streamChat({
@@ -1517,7 +1518,9 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 							now,
 							fetchLimits: currentOauth ? () => getOAuthQuotaLimits(currentOauth, signal) : undefined,
 						});
-						if (quotaAttempt > 1 && resumeAt <= Date.now() + 5_000) {
+						// A 429 right after waking means the advertised reset has not taken effect
+						// yet; the provider's new estimate is unreliable, so poll every minute.
+						if (quotaWoke) {
 							resumeAt = Date.now() + DEFAULT_QUOTA_BACKOFF_MS;
 						}
 						const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1553,9 +1556,10 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 							if (switched.sampling !== undefined) sampling = switched.sampling;
 							if (switched.modelParams !== undefined) modelParams = switched.modelParams;
 						}
-						if (manualWake && quotaAttempt > 0) {
+						if ((manualWake || quotaWoke) && quotaAttempt > 0) {
 							quotaAttempt--;
 						}
+						quotaWoke = true;
 					}
 				}
 			} finally {
