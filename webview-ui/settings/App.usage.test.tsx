@@ -126,3 +126,47 @@ it("preserves model options changed elsewhere when saving an unrelated setting",
   expect(hostFeatures.trackUsage).toBe(true);
   expect(hostFeatures.modelOptions["openai:gpt-6-sol"][0].value).toBe("fast");
 });
+
+it("keeps Token Usage models sorted best-to-worst across refreshes regardless of lastUsed timestamps", () => {
+  receive({
+    type: "usageData",
+    usage: {
+      "gemini-3.8-flash-medium": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 9000 },
+      "claude-haiku-5-5": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 8000 },
+      "claude-sonnet-5-5": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 7000 },
+      "gemini-4-argon-medium": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 9500 },
+      "claude-opus-5-5": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 1000 },
+      "gemini-3.8-flash-high": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 2000 },
+    },
+  });
+  const textOrder = () => {
+    const html = container.textContent || "";
+    return [
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-haiku-5-5",
+      "gemini-4-argon-medium",
+      "gemini-3.8-flash-high",
+      "gemini-3.8-flash-medium",
+    ].map((id) => html.indexOf(id));
+  };
+  const firstOrder = textOrder();
+  expect(firstOrder.every((idx) => idx >= 0)).toBe(true);
+  expect(firstOrder).toEqual([...firstOrder].sort((a, b) => a - b));
+
+  // Refreshing with updated lastUsed timestamps must not jump model positions.
+  receive({
+    type: "usageData",
+    usage: {
+      "gemini-3.8-flash-medium": { promptTokens: 200, completionTokens: 40, requests: 3, lastUsed: 99999 },
+      "claude-haiku-5-5": { promptTokens: 200, completionTokens: 40, requests: 3, lastUsed: 88888 },
+      "claude-sonnet-5-5": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 100 },
+      "gemini-4-argon-medium": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 200 },
+      "claude-opus-5-5": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 50 },
+      "gemini-3.8-flash-high": { promptTokens: 100, completionTokens: 20, requests: 2, lastUsed: 300 },
+    },
+  });
+  const secondOrder = textOrder();
+  expect(secondOrder).toEqual([...secondOrder].sort((a, b) => a - b));
+});
+

@@ -19,6 +19,7 @@ import { CODEX_CONFIG as CODEX, codexHeaders, createCodexRequest, parseCodexStre
 import { ANTIGRAVITY_CONFIG as ANTIGRAVITY, antigravityHeaders, antigravitySessionId, antigravityModelChoices, resolveAntigravityModel, toAntigravityRequest, parseAntigravityStream, resolveAntigravityProject, AntigravityProtocolError } from "./oauth/antigravity";
 import type { ModelParams, SamplingParams } from "./provider/types";
 import { OAUTH_KINDS, OAUTH_PROVIDER_DEFINITIONS, isOAuthProviderKind, supportsOAuthQuota } from "../shared/oauthProviders";
+import { compareModels, sortModels } from "../shared/modelSort";
 import type { OAuthLoginOptions, AccountLogin } from "./oauth/accountAuth";
 export type { OAuthLoginOptions } from "./oauth/accountAuth";
 
@@ -959,8 +960,8 @@ async function fetchAntigravityModels(id: string, signal?: AbortSignal): Promise
   const payload: unknown = await response.json();
   const models = payload && typeof payload === "object" && "models" in payload ? payload.models : undefined;
   if (!models || typeof models !== "object" || Array.isArray(models)) throw new Error("Antigravity returned an invalid model catalog.");
-  const ids = Object.entries(models).filter(([id, info]) => id.trim() && info && typeof info === "object"
-    && !Array.isArray(info) && !("isInternal" in info && info.isInternal)).map(([id]) => id);
+  const ids = sortModels(Object.entries(models).filter(([id, info]) => id.trim() && info && typeof info === "object"
+    && !Array.isArray(info) && !("isInternal" in info && info.isInternal)).map(([id]) => id));
   const current = accounts.get(id);
   if (!requested || !current || current.disabled || generation !== contextGeneration || antigravityCatalogIdentity(current) !== antigravityCatalogIdentity(requested)) {
     throw new Error("The Antigravity account changed during model discovery.");
@@ -1089,7 +1090,7 @@ async function getClaudeLimits(acc: OAuthAccount, signal?: AbortSignal): Promise
   };
   win(d.five_hour, "Session (5h)");
   win(d.seven_day, "Weekly (7d)");
-  for (const [k, v] of Object.entries(d)) {
+  for (const [k, v] of Object.entries(d).sort(([a], [b]) => compareModels(a, b))) {
     if (k.startsWith("seven_day_") && k !== "seven_day") win(v, `Weekly ${k.slice("seven_day_".length)} (7d)`);
   }
   return out;
@@ -1165,13 +1166,16 @@ async function getAntigravityLimits(acc: OAuthAccount, signal?: AbortSignal): Pr
     body: JSON.stringify({ project: fresh.projectId }),
   } }), signal);
   const d = await quotaJson(r, "Antigravity usage", signal);
-  const out: OAuthLimit[] = [];
+  const entries: { key: string; limit: OAuthLimit }[] = [];
   for (const [key, info] of Object.entries<any>(d.models ?? {})) {
     if (!info?.quotaInfo || info.isInternal) continue;
     const remaining = Number(info.quotaInfo.remainingFraction ?? 0);
-    out.push({ label: info.displayName || key, remaining: Math.max(0, Math.min(100, Math.round(remaining * 100))), limit: 100, resetsAt: parseResetMs(info.quotaInfo.resetTime) });
+    entries.push({
+      key,
+      limit: { label: info.displayName || key, remaining: Math.max(0, Math.min(100, Math.round(remaining * 100))), limit: 100, resetsAt: parseResetMs(info.quotaInfo.resetTime) },
+    });
   }
-  return out;
+  return entries.sort((a, b) => compareModels({ id: a.key, label: a.limit.label }, { id: b.key, label: b.limit.label })).map((e) => e.limit);
 }
 
 // ---- Model listing ----
@@ -1179,7 +1183,7 @@ async function getAntigravityLimits(acc: OAuthAccount, signal?: AbortSignal): Pr
 export async function listOAuthModels(kind: OAuthKind): Promise<string[]> {
   if (!["claude-code", "codex", "antigravity"].includes(kind)) {
     const { accountModels } = await import("./oauth/providerTransport.js");
-    return accountModels(kind);
+    return sortModels(accountModels(kind));
   }
   if (kind === "claude-code") {
     const curated = [...ANTHROPIC.models];
@@ -1200,17 +1204,17 @@ export async function listOAuthModels(kind: OAuthKind): Promise<string[]> {
             seen.add(id);
             merged.push(id);
           }
-          return merged;
+          return sortModels(merged);
         }
       }
     } catch {
       /* fall through to preset */
     }
-    return curated;
+    return sortModels(curated);
   }
   if (kind === "antigravity") {
     const acc = firstOfKind("antigravity");
-    if (!acc) return [...ANTIGRAVITY.models];
+    if (!acc) return sortModels(ANTIGRAVITY.models);
     try {
       await ensureAntigravityProject(acc.id);
       return antigravityModelChoices(await fetchAntigravityModels(acc.id));
@@ -1220,10 +1224,10 @@ export async function listOAuthModels(kind: OAuthKind): Promise<string[]> {
     const current = accounts.get(acc.id);
     if (!current || current.disabled) return [];
     const cached = cachedAntigravityModels(current);
-    return cached === undefined ? [...ANTIGRAVITY.models] : antigravityModelChoices(cached);
+    return cached === undefined ? sortModels(ANTIGRAVITY.models) : antigravityModelChoices(cached);
   }
   const acc = firstOfKind("codex");
-  if (!acc) return [...CODEX.fallbackModels];
+  if (!acc) return sortModels(CODEX.fallbackModels);
   try {
     const r = await oauthFetch(acc.id, (fresh) => ({
       url: `${CODEX.modelsUrl}?client_version=${encodeURIComponent(CODEX.cliVersion)}`,
@@ -1232,12 +1236,12 @@ export async function listOAuthModels(kind: OAuthKind): Promise<string[]> {
     if (r.ok) {
       const d: any = await r.json();
       const ids = (d?.models ?? []).map((m: any) => m.slug).filter(Boolean);
-      if (ids.length) return ids;
+      if (ids.length) return sortModels(ids);
     }
   } catch {
     /* fall through to fallback list */
   }
-  return [...CODEX.fallbackModels];
+  return sortModels(CODEX.fallbackModels);
 }
 
 /** Whether a model id belongs to a connected OAuth provider. */

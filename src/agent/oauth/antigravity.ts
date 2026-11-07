@@ -14,6 +14,7 @@ import type { ModelParams, SamplingParams } from "../provider/types";
 import type { ProviderEvent, ToolCall, ToolSchema, WireContentPart, WireMessage } from "../types";
 import { sseData } from "../provider/sse";
 import { UsageTracker } from "../provider/usage";
+import { sortModels } from "../../shared/modelSort";
 
 // OpenCursor's installed-app protocol for Google Antigravity.
 // Gemini CLI is a separate OAuth client, scope set and transport. Existing
@@ -50,7 +51,7 @@ export function antigravityModelChoices(availableModels: readonly string[]): str
   for (const alias of Object.keys(MODEL_ALIASES)) {
     if (available.has(resolveAntigravityModel(alias).model)) choices.add(alias);
   }
-  return [...choices];
+  return sortModels([...choices]);
 }
 
 export const ANTIGRAVITY_CONFIG = {

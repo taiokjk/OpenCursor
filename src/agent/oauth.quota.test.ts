@@ -235,4 +235,27 @@ describe("Codex reset credit is sent once", () => {
     clearOAuthCooldowns("claude-code");
     await expect(consume()).resolves.toContainEqual({ type: "text-delta", text: "Resumed" });
   });
+
+  it("sorts Antigravity per-model quota limits best-to-worst regardless of upstream map order", async () => {
+    const account = await seed("antigravity");
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      models: {
+        "gemini-3.8-flash-low": { displayName: "Gemini 3.8 Flash (Low)", quotaInfo: { remainingFraction: 0.9 } },
+        "claude-sonnet-5-5-medium": { displayName: "Claude Sonnet 5.5 (Medium)", quotaInfo: { remainingFraction: 0.7 } },
+        "gemini-4-argon-high": { displayName: "Gemini 4 Argon (High)", quotaInfo: { remainingFraction: 0.8 } },
+        "claude-opus-5-5-high": { displayName: "Claude Opus 5.5 (High)", quotaInfo: { remainingFraction: 0.5 } },
+        "claude-opus-5-5-low": { displayName: "Claude Opus 5.5 (Low)", quotaInfo: { remainingFraction: 0.6 } },
+        "claude-sonnet-5-5-high": { displayName: "Claude Sonnet 5.5 (High)", quotaInfo: { remainingFraction: 0.75 } },
+      },
+    })));
+    const usage = await getAccountLimits(account.id);
+    expect(usage.limits.map((l) => l.label)).toEqual([
+      "Claude Opus 5.5 (High)",
+      "Claude Opus 5.5 (Low)",
+      "Claude Sonnet 5.5 (High)",
+      "Claude Sonnet 5.5 (Medium)",
+      "Gemini 4 Argon (High)",
+      "Gemini 3.8 Flash (Low)",
+    ]);
+  });
 });
