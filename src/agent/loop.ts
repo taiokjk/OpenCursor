@@ -664,7 +664,7 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 					type: "tool-call-started",
 					callId,
 					name: "Task",
-					input: { model: stripScope(subModel) },
+					input: { model: stripScope(subModel), ...(taskOpts?.description ? { description: taskOpts.description } : {}) },
 				});
 			}
 			// Attach any provided files to the subagent prompt as context.
@@ -828,7 +828,9 @@ async function runAgentInWorkspace(opts: RunAgentOptions): Promise<void> {
 			if (request.action === "message" || request.action === "followup") {
 				if (!request.message?.trim()) return "error: message must not be empty";
 				if (active || request.action === "message") { agent.mailbox.push(request.message); return `Message queued for ${agent.id} (${agent.status}).`; }
-				return toolCtx.runSubagent!(request.message, agent.readonly, agent.type, signal, undefined, { resume: agent.id, model: agent.model, description: agent.title, runInBackground: true });
+				// The FollowupAgent call id anchors the relaunched child's UI stream and
+				// approval prompts; without it they have no card and the run hangs unseen.
+				return toolCtx.runSubagent!(request.message, agent.readonly, agent.type, signal, request.callId, { resume: agent.id, model: agent.model, description: agent.title, runInBackground: true });
 			}
 			if (request.action === "interrupt") { active?.abort.abort(); await active?.promise; return `Collaborator ${agent.id}: ${agent.status}`; }
 			if (active) await new Promise<void>(resolve => {

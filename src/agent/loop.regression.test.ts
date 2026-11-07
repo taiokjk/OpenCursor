@@ -1500,6 +1500,24 @@ describe("persistent collaborators, steering and goal evidence", () => {
     expectFinished(events, "Message queued for the interrupted collaborator.", 3);
   });
 
+  it("anchors a follow-up run's UI stream and approvals to the FollowupAgent call", async () => {
+    const contextState: NonNullable<RunAgentOptions["contextState"]> = { agents: [{ id: "done-agent", title: "Fixes", model: "test-model", readonly: false,
+      status: "completed", history: [{ kind: "assistant", calls: [], text: "Round one done" }], mailbox: [], updatedAt: 1 }] };
+    const approve = vi.fn(async () => true as const);
+    const { events } = await run([
+      toolTurn(call("FollowupAgent", { id: "done-agent", message: "Fix round two" }, "followup-call")),
+      toolTurn(call("Shell", { command: "go test ./..." }, "child-shell")),
+      answer("Round two done."),
+      answer("Integrated round two."),
+    ], { contextState, approve });
+    expect(approve).toHaveBeenCalledWith("Shell", expect.anything(), "child-shell");
+    expect(events).toContainEqual(expect.objectContaining({ type: "tool-call-started", callId: "followup-call", name: "Task",
+      input: expect.objectContaining({ description: "Fixes" }) }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "subagent-event", callId: "followup-call",
+      event: expect.objectContaining({ type: "tool-call-started", callId: "child-shell" }) }));
+    expect(contextState.agents![0]).toMatchObject({ status: "completed" });
+  });
+
   it("delivers running collaborator messages at its next safe boundary without restarting it", async () => {
     let release!: () => void, observed!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });

@@ -90,7 +90,7 @@ export const taskTool = defineTool("Task", false, async (input, abortSignal, cal
 
 export const listAgentsTool = defineTool("ListAgents", false, async (_input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "list" }, signal) ?? "No agent registry is available." }));
 export const sendAgentMessageTool = defineTool("SendAgentMessage", false, async (input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "message", id: input.id, message: input.message }, signal) ?? "error: agent collaboration unavailable" }));
-export const followupAgentTool = defineTool("FollowupAgent", false, async (input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "followup", id: input.id, message: input.message }, signal) ?? "error: agent collaboration unavailable" }));
+export const followupAgentTool = defineTool("FollowupAgent", false, async (input, signal, callId, ctx) => ({ output: await ctx?.agentControl?.({ action: "followup", id: input.id, message: input.message, callId }, signal) ?? "error: agent collaboration unavailable" }));
 export const interruptAgentTool = defineTool("InterruptAgent", false, async (input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "interrupt", id: input.id }, signal) ?? "error: agent collaboration unavailable" }));
 export const waitForAgentTool = defineTool("WaitForAgent", false, async (input, signal, _id, ctx) => ({ output: await ctx?.agentControl?.({ action: "wait", id: input.id, timeout_ms: input.timeout_ms }, signal) ?? "error: agent collaboration unavailable" }));
 

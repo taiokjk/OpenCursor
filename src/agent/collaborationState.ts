@@ -20,4 +20,4 @@ export interface Collaborator {
   result?: string;
   updatedAt: number;
 }
-export interface AgentControlRequest { action: "list" | "message" | "followup" | "interrupt" | "wait"; id?: string; message?: string; timeout_ms?: number }
+export interface AgentControlRequest { action: "list" | "message" | "followup" | "interrupt" | "wait"; id?: string; message?: string; timeout_ms?: number; callId?: string }
