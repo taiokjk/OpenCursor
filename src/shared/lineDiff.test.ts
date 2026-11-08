@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { changedLinesSince, computeHunks, makeDiff, revertOnto } from "./lineDiff";
+import { computeHunks, lineEdits, makeDiff, revertOnto, withoutHunk } from "./lineDiff";
 
 function restore(before: string, after: string) {
   const lines = after.length ? after.split("\n") : [];
@@ -71,18 +71,23 @@ describe("three-way undo of an agent change", () => {
   });
 });
 
-describe("agent-only change highlighting", () => {
-  it("follows the agent's lines through unrelated user edits", () => {
-    expect(changedLinesSince("a\nb\nc", "a\nB\nc", "a\nB\nc")).toEqual([1]);
-    expect(changedLinesSince("a\nb\nc", "a\nB\nc", "new\nnew\na\nB\nc\nmore")).toEqual([3]);
+describe("small editor edits", () => {
+  const apply = (current: string, next: string) => {
+    let out = current;
+    for (const { start, end, text } of [...lineEdits(current, next)].reverse()) out = out.slice(0, start) + text + out.slice(end);
+    return out;
+  };
+  it.each([
+    ["a\nb\nc", "a\nB\nc"], ["a\nb\nc", "a\nc"], ["a\nb\nc", "a\nb"], ["a\nb", "a\nb\nc"],
+    ["a", "x\na"], ["", "a"], ["a", ""], ["a\nb\nc", "b"], ["a\n", "a\nb\n"], ["x\ny", "x\nmid\ny"],
+  ])("turns %j into %j exactly", (current, next) => {
+    expect(apply(current, next)).toBe(next);
   });
-  it("never attributes the user's separate edits to the agent", () => {
-    expect(changedLinesSince("a\nb\nc", "a\nB\nc", "a\nB\nC")).toEqual([1]);
+  it("touches only the changed lines", () => {
+    expect(lineEdits("keep\nold\nkeep", "keep\nnew\nkeep")).toEqual([{ start: 5, end: 9, text: "new\n" }]);
   });
-  it("keeps highlighting a region the user edited inside the agent's change", () => {
-    expect(changedLinesSince("a\nb\nc", "a\nB1\nB2\nc", "a\nB1\nmine\nc")).toEqual([1, 2]);
-  });
-  it("is empty without a change", () => {
-    expect(changedLinesSince("a", "a", "a\nb")).toEqual([]);
+  it("undoes a single block without the others", () => {
+    const [, second] = computeHunks("a\nb\nc\nd", "A\nb\nc\nD");
+    expect(withoutHunk("A\nb\nc\nD", second)).toBe("A\nb\nc\nd");
   });
 });

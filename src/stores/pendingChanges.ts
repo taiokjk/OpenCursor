@@ -326,13 +326,19 @@ export class PendingChangesStore {
     }
     if (errors.length) throw new Error(errors.join("\n"));
   }
+  /** Accepting only updates review state; the agent's text is already in the file. */
   async acceptHunk(file: string, hunkIndex: number, scope?: ChangeScope): Promise<void> {
-    await this.changeHunk(file, hunkIndex, false, scope);
+    await this.changeHunk(file, hunkIndex, false, scope, false);
   }
-  async rejectHunk(file: string, hunkIndex: number, scope?: ChangeScope): Promise<void> {
-    await this.changeHunk(file, hunkIndex, true, scope);
+  /**
+   * `appliedInEditor` means the caller already undid the block in an unsaved
+   * editor buffer, so only review state changes; writing the file underneath
+   * that buffer would make VS Code report a save conflict.
+   */
+  async rejectHunk(file: string, hunkIndex: number, scope?: ChangeScope, options?: { appliedInEditor?: boolean }): Promise<void> {
+    await this.changeHunk(file, hunkIndex, true, scope, !options?.appliedInEditor);
   }
-  private async changeHunk(file: string, index: number, reject: boolean, scope?: ChangeScope) {
+  private async changeHunk(file: string, index: number, reject: boolean, scope: ChangeScope | undefined, writeFile: boolean) {
     await withPathLock(file, undefined, async (canonical) => {
       const key = this.key(canonical);
       if (key !== this.key(file) && this.changes.has(this.key(file))) throw new Error(`Cannot update hunk in ${file}: its destination changed. Current file was preserved.`);
@@ -350,9 +356,9 @@ export class PendingChangesStore {
       else beforeLines.splice(h.beforeStart, h.beforeLines.length, ...h.afterLines);
       const before = beforeLines.join("\n");
       const after = afterLines.join("\n");
-      const snapshot = await readSnapshot(canonical);
-      if (reject) {
+      if (writeFile) {
         // Undo just this block on the current file so the user's separate edits survive.
+        const snapshot = await readSnapshot(canonical);
         const view = textView(snapshot.data);
         if (snapshot.data === null || view.previewOnly) throw new Error(`Cannot undo a block in ${file}: the file is no longer readable as text. Current content was preserved.`);
         const merged = revertOnto(after, last.after, view.text);

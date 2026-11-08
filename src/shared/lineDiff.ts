@@ -110,7 +110,7 @@ const splitLines = (text: string) => text.length ? text.split("\n") : [];
  * Whether two edits of the same base touch the same lines. Pure insertions only
  * conflict when they land strictly inside the other edit, or at the same point.
  */
-function editsOverlap(a: LineEdit, b: LineEdit): boolean {
+export function editsOverlap(a: LineEdit, b: LineEdit): boolean {
   const aEmpty = a.start === a.end, bEmpty = b.start === b.end;
   if (aEmpty && bEmpty) return a.start === b.start;
   if (aEmpty) return b.start < a.start && a.start < b.end;
@@ -150,31 +150,38 @@ export function revertOnto(before: string, after: string, current: string): stri
   return out.join("\n");
 }
 
+/** `after` with only hunk `hunk` of before→after undone. */
+export function withoutHunk(after: string, hunk: Hunk): string {
+  const lines = splitLines(after);
+  lines.splice(hunk.startLine, hunk.afterLines.length, ...hunk.beforeLines);
+  return lines.join("\n");
+}
+
 /**
- * Lines of `current` that still show the before→after change. Later edits that
- * overlap the change stay highlighted (the region is mixed); unrelated later
- * edits elsewhere in the file are not attributed to the change.
+ * Character-offset replacements that turn `current` into `next`, one per changed
+ * line block, so an editor applies a small undoable edit instead of replacing
+ * the whole document. Offsets refer to `current`.
  */
-export function changedLinesSince(before: string, after: string, current: string): number[] {
-  const undo = undoEdits(before, after);
-  if (!undo.length) return [];
-  const later = computeHunks(after, current);
-  const lines = new Set<number>();
-  // Map each unchanged `after` line to its position in `current`.
-  let next = 0, offset = 0;
-  const mapThrough = (limit: number, into: (line: number, mapped: number) => void) => {
-    for (; next < limit; next++) into(next, next + offset);
-  };
-  const inChange = (line: number) => undo.some((u) => u.start <= line && line < u.end);
-  for (const h of later) {
-    mapThrough(h.beforeStart, (line, mapped) => { if (inChange(line)) lines.add(mapped); });
-    next = h.beforeEnd;
-    offset = h.startLine + h.afterLines.length - h.beforeEnd;
-    const edit = { start: h.beforeStart, end: h.beforeEnd, lines: h.afterLines };
-    if (undo.some((u) => editsOverlap(u, edit))) for (let i = 0; i < h.afterLines.length; i++) lines.add(h.startLine + i);
-  }
-  mapThrough(splitLines(after).length, (line, mapped) => { if (inChange(line)) lines.add(mapped); });
-  return [...lines].sort((a, b) => a - b);
+export function lineEdits(current: string, next: string): Array<{ start: number; end: number; text: string }> {
+  if (current === next) return [];
+  if (!current.length) return [{ start: 0, end: 0, text: next }];
+  const lines = current.split("\n");
+  const starts: number[] = [];
+  let offset = 0;
+  for (const line of lines) { starts.push(offset); offset += line.length + 1; }
+  starts.push(offset);
+  // Every line is treated as ending in "\n"; the last line's virtual newline is trimmed back off.
+  return computeHunks(current, next).map((h) => {
+    if (h.beforeStart === lines.length) return { start: current.length, end: current.length, text: "\n" + h.afterLines.join("\n") };
+    let start = starts[h.beforeStart], end = starts[h.beforeEnd];
+    let text = h.afterLines.map((line) => line + "\n").join("");
+    if (end > current.length) {
+      end = current.length;
+      if (text) text = text.slice(0, -1);
+      else start = Math.max(0, start - 1);
+    }
+    return { start, end, text };
+  });
 }
 
 /** Where line `line` of `after` sits in `current`, following insertions and deletions made since. */
