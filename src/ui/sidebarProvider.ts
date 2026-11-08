@@ -945,7 +945,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private _sendPendingChanges() {
     if (!this._view) return;
     const stats = new Map<string, { before: string; after: string; previewOnly?: boolean; added: number; removed: number }>();
-    const changes = (this._activeId ? pendingChanges.list({ conversationId: this._activeId }) : []).map((c) => {
+    const scope = this._activeId ? { conversationId: this._activeId } : undefined;
+    const changes = (scope ? pendingChanges.list(scope) : []).map((c) => {
       let stat = this._changeStats.get(c.path);
       if (!stat || stat.before !== c.before || stat.after !== c.after || stat.previewOnly !== c.previewOnly) {
         let added = 0;
@@ -957,7 +958,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         stat = { before: c.before, after: c.after, previewOnly: c.previewOnly, added, removed };
       }
       stats.set(c.path, stat);
-      return { path: c.path, existedBefore: c.existedBefore, added: stat.added, removed: stat.removed };
+      // Latest turn that edited this file; matches the store's fromTurnIndex rule
+      // (unowned edits count as -1) so the webview only offers to revert files
+      // a message-level revert would actually touch.
+      const lastTurn = Math.max(-1, ...pendingChanges.snapshots(c.path, scope).map((s) => s.owner?.turnIndex ?? -1));
+      return { path: c.path, existedBefore: c.existedBefore, added: stat.added, removed: stat.removed, lastTurn };
     });
     this._changeStats = stats;
     this._view.webview.postMessage({ type: "pendingChanges", changes });

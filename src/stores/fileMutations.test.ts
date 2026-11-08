@@ -79,12 +79,28 @@ describe("production file transactions and undo", () => {
     expect(pendingChanges.has(file)).toBe(false);
     expect(pendingChanges.count()).toBe(0);
   });
-  it("refuses stale whole-file and hunk undo while preserving newer user content and tracking", async () => {
+  it("refuses stale hunk undo but reverts only the agent's lines around a separate user edit", async () => {
     const file = path.join(root, "manual.txt"); await fs.writeFile(file, "original\n");
     await writeTool.execute({ path: file, contents: "agent\n" }); await fs.appendFile(file, "manual\n");
-    await expect(pendingChanges.reject(file)).rejects.toThrow("changed after");
     await expect(pendingChanges.rejectHunk(file, 0)).rejects.toThrow("newer changes");
     expect(await fs.readFile(file, "utf8")).toBe("agent\nmanual\n"); expect(pendingChanges.has(file)).toBe(true);
+    await pendingChanges.reject(file);
+    expect(await fs.readFile(file, "utf8")).toBe("original\nmanual\n"); expect(pendingChanges.has(file)).toBe(false);
+  });
+  it("keeps user edits elsewhere in the file when rejecting several agent edits", async () => {
+    const file = path.join(root, "multi.txt"); await fs.writeFile(file, "a\nb\nc\nd\ne\n");
+    await strReplaceTool.execute({ path: file, old_string: "b\n", new_string: "B1\nB2\n" });
+    await strReplaceTool.execute({ path: file, old_string: "e\n", new_string: "E\n" });
+    await fs.writeFile(file, "user top\na\nB1\nB2\nc\nd edited\nE\n");
+    await pendingChanges.reject(file);
+    expect(await fs.readFile(file, "utf8")).toBe("user top\na\nb\nc\nd edited\ne\n");
+  });
+  it("refuses whole-file undo when the user edited the agent's own lines", async () => {
+    const file = path.join(root, "overlap.txt"); await fs.writeFile(file, "one\ntwo\n");
+    await writeTool.execute({ path: file, contents: "one\nagent\n" });
+    await fs.writeFile(file, "one\nagent tweaked by user\n");
+    await expect(pendingChanges.reject(file)).rejects.toThrow("same lines");
+    expect(await fs.readFile(file, "utf8")).toBe("one\nagent tweaked by user\n"); expect(pendingChanges.has(file)).toBe(true);
   });
   it("scopes earlier-turn undo to the originating conversation and turn", async () => {
     const a = path.join(root, "a"), b = path.join(root, "b"), old = path.join(root, "old");

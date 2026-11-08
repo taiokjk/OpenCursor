@@ -101,6 +101,82 @@ export function computeHunks(before: string, after: string): Hunk[] {
   return hunks;
 }
 
+/** A replacement of `base` lines [start, end) with `lines`. */
+interface LineEdit { start: number; end: number; lines: string[] }
+
+const splitLines = (text: string) => text.length ? text.split("\n") : [];
+
+/**
+ * Whether two edits of the same base touch the same lines. Pure insertions only
+ * conflict when they land strictly inside the other edit, or at the same point.
+ */
+function editsOverlap(a: LineEdit, b: LineEdit): boolean {
+  const aEmpty = a.start === a.end, bEmpty = b.start === b.end;
+  if (aEmpty && bEmpty) return a.start === b.start;
+  if (aEmpty) return b.start < a.start && a.start < b.end;
+  if (bEmpty) return a.start < b.start && b.start < a.end;
+  return a.start < b.end && b.start < a.end;
+}
+
+/** The agent's change expressed as edits on `after` that restore `before`. */
+const undoEdits = (before: string, after: string): LineEdit[] =>
+  computeHunks(before, after).map((h) => ({ start: h.startLine, end: h.startLine + h.afterLines.length, lines: h.beforeLines }));
+
+/** Later edits expressed as edits on `after` that produce `current`. */
+const laterEdits = (after: string, current: string): LineEdit[] =>
+  computeHunks(after, current).map((h) => ({ start: h.beforeStart, end: h.beforeEnd, lines: h.afterLines }));
+
+/**
+ * Three-way undo: remove the before→after change from `current` while keeping
+ * edits made since `after`. Returns null when those later edits touch the same
+ * lines as the change, so the caller never overwrites work it cannot separate.
+ */
+export function revertOnto(before: string, after: string, current: string): string | null {
+  if (current === after) return before;
+  const undo = undoEdits(before, after);
+  const later = laterEdits(after, current);
+  if (undo.some((u) => later.some((l) => editsOverlap(u, l)))) return null;
+  // Insertions sort before a replacement at the same line, preserving order.
+  const edits = [...undo, ...later].sort((x, y) => x.start - y.start || (x.end - x.start) - (y.end - y.start));
+  const base = splitLines(after);
+  const out: string[] = [];
+  let cursor = 0;
+  for (const edit of edits) {
+    for (let i = cursor; i < edit.start; i++) out.push(base[i]);
+    for (const line of edit.lines) out.push(line);
+    cursor = edit.end;
+  }
+  for (let i = cursor; i < base.length; i++) out.push(base[i]);
+  return out.join("\n");
+}
+
+/**
+ * Lines of `current` that still show the before→after change. Later edits that
+ * overlap the change stay highlighted (the region is mixed); unrelated later
+ * edits elsewhere in the file are not attributed to the change.
+ */
+export function changedLinesSince(before: string, after: string, current: string): number[] {
+  const undo = undoEdits(before, after);
+  if (!undo.length) return [];
+  const later = computeHunks(after, current);
+  const lines = new Set<number>();
+  // Map each unchanged `after` line to its position in `current`.
+  let next = 0, offset = 0;
+  const mapThrough = (limit: number, into: (line: number, mapped: number) => void) => {
+    for (; next < limit; next++) into(next, next + offset);
+  };
+  const inChange = (line: number) => undo.some((u) => u.start <= line && line < u.end);
+  for (const h of later) {
+    mapThrough(h.beforeStart, (line, mapped) => { if (inChange(line)) lines.add(mapped); });
+    next = h.beforeEnd;
+    offset = h.startLine + h.afterLines.length - h.beforeEnd;
+    const edit = { start: h.beforeStart, end: h.beforeEnd, lines: h.afterLines };
+    if (undo.some((u) => editsOverlap(u, edit))) for (let i = 0; i < h.afterLines.length; i++) lines.add(h.startLine + i);
+  }
+  mapThrough(splitLines(after).length, (line, mapped) => { if (inChange(line)) lines.add(mapped); });
+  return [...lines].sort((a, b) => a - b);
+}
+
 export function makeDiff(_filePath: string, before: string, after: string): string {
   const out: string[] = [];
   let chars = 0;

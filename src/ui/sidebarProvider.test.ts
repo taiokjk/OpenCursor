@@ -32,7 +32,7 @@ vi.mock("../stores/usageStore", () => ({ recordUsage: vi.fn() }));
 vi.mock("../integrations/hooksRunner", () => ({ runHooks: vi.fn(), runBlockingHooks: vi.fn(async () => undefined) }));
 vi.mock("../context/workspaceUtils", () => ({ getWorkspaceRoot: () => "/workspace", findWorkspaceRoot: () => "/workspace", safePath: (p: string) => p, withWorkspaceRoot: (_root: string | undefined, work: () => unknown) => work() }));
 vi.mock("../agent/personas", () => ({}));
-vi.mock("../stores/pendingChanges", () => ({ pendingChanges: { rejectAll: vi.fn(), list: vi.fn(() => []), get: vi.fn(), has: vi.fn(() => false) } }));
+vi.mock("../stores/pendingChanges", () => ({ pendingChanges: { rejectAll: vi.fn(), list: vi.fn(() => []), snapshots: vi.fn(() => []), get: vi.fn(), has: vi.fn(() => false) }, computeHunks: vi.fn(() => []) }));
 vi.mock("./fileIcons", () => ({}));
 vi.mock("../context/mentions", () => ({ resolveMentions: vi.fn() }));
 vi.mock("../logging", () => ({ getLog: () => ({ appendLine: vi.fn() }), logError: vi.fn() }));
@@ -498,6 +498,26 @@ describe("durable host-owned follow-up queue", () => {
     await host._showDiff("file.ts");
     expect(pendingChanges.get).toHaveBeenCalledWith("file.ts", { conversationId: b.id });
     expect(vscode.commands.executeCommand).toHaveBeenCalledWith("ocursor.viewDiff", "file.ts", { conversationId: b.id });
+  });
+
+  it("reports the latest editing turn per file so the webview can scope message reverts", async () => {
+    const { host, b } = await fixture();
+    vi.mocked(pendingChanges.list).mockReturnValueOnce([
+      { path: "old.ts", before: "a", after: "b", existedBefore: true },
+      { path: "new.ts", before: "a", after: "b", existedBefore: true },
+    ]);
+    vi.mocked(pendingChanges.snapshots).mockImplementation((file: string) => file === "old.ts"
+      ? [{ path: "old.ts", before: "a", after: "b", existedBefore: true, owner: { conversationId: b.id, turnIndex: 0 } }]
+      : [
+        { path: "new.ts", before: "a", after: "x", existedBefore: true, owner: { conversationId: b.id, turnIndex: 0 } },
+        { path: "new.ts", before: "x", after: "b", existedBefore: true, owner: { conversationId: b.id, turnIndex: 4 } },
+      ]);
+    host._sendPendingChanges();
+    expect(host._view.webview.postMessage).toHaveBeenCalledWith({ type: "pendingChanges", changes: [
+      expect.objectContaining({ path: "old.ts", lastTurn: 0 }),
+      expect.objectContaining({ path: "new.ts", lastTurn: 4 }),
+    ] });
+    vi.mocked(pendingChanges.snapshots).mockReset().mockReturnValue([]);
   });
 
   it("persists interrupted request edits as drafts before removing them from the queue", async () => {

@@ -1741,8 +1741,8 @@ export function Composer({
             })()}
             <ModelPicker models={models} modelList={modelList} selected={selectedModel} onSelect={onSelectModel} onSaveOptions={onSaveModelOptions} onResetOptions={onResetModelOptions} />
             {editing && (
-              <button className="attach-btn" title="Cancel edit (Esc)" onClick={() => onCancelEdit?.()}>
-                <Icon name="close" size={15} />
+              <button type="button" className="edit-cancel-btn" title="Cancel edit (Esc)" aria-label="Cancel edit" onClick={() => onCancelEdit?.()}>
+                Cancel
               </button>
             )}
             {isRunning && !editing && onTogglePause && (

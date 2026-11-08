@@ -2144,6 +2144,21 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	color: var(--fg);
 	background: var(--hover);
 }
+.edit-cancel-btn {
+	flex: 0 0 auto;
+	height: 24px;
+	padding: 0 10px;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: transparent;
+	color: var(--fg-dim);
+	font-size: 12px;
+	cursor: pointer;
+}
+.edit-cancel-btn:hover {
+	color: var(--fg);
+	background: var(--hover);
+}
 
 /* Inline phase indicator (Searchable shimmering status) */
 .error-boundary {
