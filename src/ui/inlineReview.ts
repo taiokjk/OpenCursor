@@ -9,7 +9,7 @@
 
 import * as vscode from "vscode";
 import { pendingChanges, type ChangeScope, type PendingChange } from "../stores/pendingChanges";
-import { changedLinesSince } from "../shared/lineDiff";
+import { changedLinesSince, computeHunks, mapLineForward } from "../shared/lineDiff";
 import { safePath } from "../context/workspaceUtils";
 import { createHash } from "node:crypto";
 
@@ -198,6 +198,51 @@ function pendingPathFor(uri?: vscode.Uri): string | undefined {
   return file ? pendingByPath().get(file)?.path : undefined;
 }
 
+/**
+ * Accept/Reject links above each agent block. Block indexes match the store's
+ * unscoped hunks (first original → latest agent text); the agent-side start
+ * line travels with the command so a click on a stale lens is refused rather
+ * than applied to a different block.
+ */
+const codeLensesChanged = new vscode.EventEmitter<void>();
+const blockLenses: vscode.CodeLensProvider = {
+  onDidChangeCodeLenses: codeLensesChanged.event,
+  provideCodeLenses(document) {
+    if (document.uri.scheme !== "file") return [];
+    const change = pendingByPath().get(document.uri.fsPath);
+    if (!change || change.previewOnly) return [];
+    const text = document.getText();
+    const lastLine = Math.max(document.lineCount - 1, 0);
+    return computeHunks(change.before, change.after).flatMap((hunk, index) => {
+      const line = Math.min(mapLineForward(change.after, text, hunk.startLine), lastLine);
+      const range = new vscode.Range(line, 0, line, 0);
+      const args = [change.path, index, hunk.startLine];
+      return [
+        new vscode.CodeLens(range, { title: "$(check) Accept", tooltip: "Keep this agent change", command: "ocursor.acceptBlock", arguments: args }),
+        new vscode.CodeLens(range, { title: "$(discard) Reject", tooltip: "Undo this agent change", command: "ocursor.rejectBlock", arguments: args }),
+      ];
+    });
+  },
+};
+
+function blockStillCurrent(path: string, index: number, startLine: number): boolean {
+  const change = pendingChanges.get(path);
+  const current = change && !change.previewOnly && computeHunks(change.before, change.after)[index]?.startLine === startLine;
+  if (!current) void vscode.window.showInformationMessage("OpenCursor: the agent's changes in this file were updated. Try again on the refreshed block.");
+  return !!current;
+}
+
+async function reviewBlock(path: string, index: number, startLine: number, reject: boolean) {
+  await runReviewAction(async () => {
+    if (!blockStillCurrent(path, index, startLine)) return;
+    if (reject) {
+      const uri = fileUriFor(path);
+      if (!uri || !await ensureSaved([uri.fsPath])) return;
+      await pendingChanges.rejectHunk(path, index);
+    } else await pendingChanges.acceptHunk(path, index);
+  });
+}
+
 let refreshTimer: NodeJS.Timeout | undefined;
 /** Paths we currently have an inline-diff tab open for. */
 const openDiffs = new Map<string, DiffEntry>();
@@ -223,6 +268,7 @@ async function sync() {
     if (editor.document.uri.scheme === "file") refreshEditor(editor);
   }
   publishChangedFilesContext();
+  codeLensesChanged.fire();
 }
 
 function scheduleSync() {
@@ -265,6 +311,10 @@ export function registerInlineReview(context: vscode.ExtensionContext) {
       const file = pendingPathFor(uri);
       if (file) await pendingChanges.accept(file);
     })),
+    vscode.commands.registerCommand("ocursor.acceptBlock", (path: string, index: number, startLine: number) => reviewBlock(path, index, startLine, false)),
+    vscode.commands.registerCommand("ocursor.rejectBlock", (path: string, index: number, startLine: number) => reviewBlock(path, index, startLine, true)),
+    vscode.languages.registerCodeLensProvider({ scheme: "file" }, blockLenses),
+    codeLensesChanged,
     vscode.commands.registerCommand("ocursor.acceptAllChanges", () => runReviewAction(() => pendingChanges.acceptAll())),
     vscode.commands.registerCommand("ocursor.rejectAllChanges", () => runReviewAction(async () => {
       const paths = [...pendingByPath().keys()];

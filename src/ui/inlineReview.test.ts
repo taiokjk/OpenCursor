@@ -8,7 +8,7 @@
  */
 
 import { afterEach, expect, it, vi } from "vitest";
-const host = vi.hoisted(() => ({ commands: new Map<string, (...args: any[]) => any>(), provider: undefined as any, tabs: [] as any[], close: vi.fn(async () => true), execute: vi.fn(async (..._args: any[]) => undefined), pick: vi.fn(async (items: any[]) => items.at(-1)), onChange: undefined as any }));
+const host = vi.hoisted(() => ({ commands: new Map<string, (...args: any[]) => any>(), provider: undefined as any, tabs: [] as any[], close: vi.fn(async () => true), execute: vi.fn(async (..._args: any[]) => undefined), pick: vi.fn(async (items: any[]) => items.at(-1)), onChange: undefined as any, lenses: undefined as any }));
 vi.mock("vscode", () => {
   class Uri {
     constructor(readonly scheme: string, readonly path: string, readonly query = "") {}
@@ -19,10 +19,13 @@ vi.mock("vscode", () => {
   }
   class EventEmitter { event = () => ({ dispose() {} }); fire() {} dispose() {} }
   class TabInputTextDiff { constructor(readonly original: Uri, readonly modified: Uri) {} }
-  return { Uri, EventEmitter, TabInputTextDiff, Range: class { constructor(...range: number[]) { Object.assign(this, { range }); } }, ThemeColor: class {}, OverviewRulerLane: {}, DecorationRangeBehavior: {}, ViewColumn: {}, ConfigurationTarget: {},
+  class CodeLens { constructor(readonly range: any, readonly command: any) {} }
+  return { Uri, EventEmitter, TabInputTextDiff, CodeLens,
+    languages: { registerCodeLensProvider: (_selector: unknown, provider: any) => { host.lenses = provider; return { dispose() {} }; } },
+    Range: class { constructor(...range: number[]) { Object.assign(this, { range }); } }, ThemeColor: class {}, OverviewRulerLane: {}, DecorationRangeBehavior: {}, ViewColumn: {}, ConfigurationTarget: {},
     workspace: { textDocuments: [], workspaceFolders: [], getConfiguration: () => ({ inspect: () => ({}), get: () => false, update: async () => {} }), registerTextDocumentContentProvider: (_scheme: string, provider: any) => { host.provider = provider; return { dispose() {} }; }, onDidChangeTextDocument: (listener: any) => { host.onChange = listener; return { dispose() {} }; } },
     commands: { registerCommand: (name: string, callback: any) => { host.commands.set(name, callback); return { dispose() {} }; }, executeCommand: host.execute },
-    window: { visibleTextEditors: [], tabGroups: { all: [{ tabs: host.tabs }], close: host.close }, createTextEditorDecorationType: () => ({ dispose() {} }), onDidChangeVisibleTextEditors: () => ({ dispose() {} }), showQuickPick: host.pick },
+    window: { visibleTextEditors: [], tabGroups: { all: [{ tabs: host.tabs }], close: host.close }, createTextEditorDecorationType: () => ({ dispose() {} }), onDidChangeVisibleTextEditors: () => ({ dispose() {} }), showQuickPick: host.pick, showInformationMessage: vi.fn(), showErrorMessage: vi.fn(), showWarningMessage: vi.fn() },
   };
 });
 vi.mock("../context/workspaceUtils", () => ({ safePath: (value: string) => value }));
@@ -92,6 +95,31 @@ it("publishes changed files for editor title actions and accepts one file or all
   await vi.advanceTimersByTimeAsync(100);
   expect(pendingChanges.count()).toBe(0);
   expect(contexts().at(-1)?.[2]).toEqual([]);
+});
+
+it("puts Accept and Reject links above each agent block, following the user's line shifts", async () => {
+  vi.useFakeTimers(); registerInlineReview({ subscriptions } as any);
+  const file = "C:/fixture/blocks.txt";
+  pendingChanges.record(file, "a\nb\nc\nd", "A\nb\nc\nD", true, { conversationId: "chat" });
+  await vi.advanceTimersByTimeAsync(100);
+  const text = "mine\nA\nb\nc\nD";
+  const lenses = host.lenses.provideCodeLenses({ uri: vscode.Uri.file(pendingChanges.list()[0].path), getText: () => text, lineCount: 5 });
+  expect(lenses.map((lens: any) => [lens.range.range[0], lens.command.command, lens.command.arguments[1]])).toEqual([
+    [1, "ocursor.acceptBlock", 0], [1, "ocursor.rejectBlock", 0],
+    [4, "ocursor.acceptBlock", 1], [4, "ocursor.rejectBlock", 1],
+  ]);
+  expect(host.lenses.provideCodeLenses({ uri: vscode.Uri.file("C:/fixture/other.txt"), getText: () => "", lineCount: 1 })).toEqual([]);
+});
+
+it("refuses a stale block click instead of acting on a different block", async () => {
+  vi.useFakeTimers(); registerInlineReview({ subscriptions } as any);
+  const file = "C:/fixture/stale.txt";
+  pendingChanges.record(file, "a\nb", "A\nb", true, { conversationId: "chat" });
+  const path = pendingChanges.list()[0].path;
+  await host.commands.get("ocursor.acceptBlock")!(path, 0, 5);
+  expect(pendingChanges.has(file)).toBe(true);
+  await host.commands.get("ocursor.acceptBlock")!(path, 0, 0);
+  expect(pendingChanges.has(file)).toBe(false);
 });
 
 it("highlights only the agent's lines, not the user's separate edits", async () => {

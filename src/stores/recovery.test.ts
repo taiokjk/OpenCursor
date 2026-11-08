@@ -44,7 +44,7 @@ it("recovers edits captured through a stable directory alias and rejects stale c
   expect(recovered.has(file)).toBe(true);
   await fs.writeFile(file, "user changed this");
   await expect(recovered.reject(file)).rejects.toThrow("changed after");
-  await expect(recovered.rejectHunk(file, 0)).rejects.toThrow("newer changes");
+  await expect(recovered.rejectHunk(file, 0)).rejects.toThrow("edited after the agent");
   expect(recovered.has(file)).toBe(true);
   await fs.writeFile(file, "after"); await recovered.reject(file);
   expect(await fs.readFile(file, "utf8")).toBe("before");
