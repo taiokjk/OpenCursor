@@ -66,9 +66,14 @@ const newCodeId = () => `composer-code-${++codeId}`;
 const escapeAttribute = (value: string) => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const decodeAttribute = (value: string) => value.replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
+const mentionTag = (attrs: Record<string, string>) =>
+  `<attached type="${escapeAttribute(attrs.kind)}" title="${escapeAttribute(attrs.name)}" content="${escapeAttribute(attrs.path)}" />`;
+
 const basicSchema = defaultMarkdownParser.schema;
 let nodes = basicSchema.spec.nodes
   .update("paragraph", { ...basicSchema.nodes.paragraph.spec, toDOM: () => ["p", { dir: "auto" }, 0] })
+  // leafText feeds the clipboard's text/plain, which is all the composer's paste reads.
+  .update("hard_break", { ...basicSchema.nodes.hard_break.spec, leafText: () => "\n" })
   .update("heading", { ...basicSchema.nodes.heading.spec, content: "inline*", toDOM: node => [`h${node.attrs.level}`, { dir: "auto" }, 0] })
   .update("blockquote", { ...basicSchema.nodes.blockquote.spec, toDOM: () => ["blockquote", { dir: "auto" }, 0] })
   .update("list_item", {
@@ -89,6 +94,8 @@ let nodes = basicSchema.spec.nodes
 nodes = nodes.addBefore("text", "mention", {
   group: "inline", inline: true, atom: true, selectable: true,
   attrs: { kind: { default: "file" }, name: { default: "" }, path: { default: "" } },
+  // Copy/cut write the tag so pasting restores the pill instead of dropping it.
+  leafText: node => mentionTag(node.attrs),
   parseDOM: [{ tag: "span.mention", getAttrs: element => ({
     kind: element.getAttribute("data-kind") || "file", name: element.getAttribute("data-name") || "", path: element.getAttribute("data-path") || "",
   }) }],
@@ -169,7 +176,7 @@ const serializer = new MarkdownSerializer({
     state.closeBlock(node);
   },
   mention(state, node) {
-    state.write(`<attached type="${escapeAttribute(node.attrs.kind)}" title="${escapeAttribute(node.attrs.name)}" content="${escapeAttribute(node.attrs.path)}" />`);
+    state.write(mentionTag(node.attrs));
   },
   hard_break(state) { state.write("\n"); },
   list_item(state, node) {
