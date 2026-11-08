@@ -20,7 +20,7 @@ vi.mock("../shared/vscode", () => ({ vscode: { postMessage: vi.fn() } }));
 const composerRenders = vi.hoisted(() => ({ count: 0 }));
 vi.mock("./components/Composer", () => ({
   KIND_SVG: {}, applyFileIconTo: vi.fn(),
-  Composer: (props: any) => (composerRenders.count++, <div data-testid="composer" data-running={props.isRunning} data-model={props.selectedModel} data-mode={props.mode} data-draft={props.tabDraft?.text ?? ""}><button data-testid="send" onClick={() => props.onSubmit("queued-A", [])}>Send fixture</button><button data-testid="agent" onClick={() => props.onMode("agent")}>Agent mode</button><button data-testid="select-model-b" onClick={() => props.onSelectModel("api::model-B")}>Select model B</button></div>),
+  Composer: (props: any) => (composerRenders.count++, <div data-testid="composer" data-running={props.isRunning} data-model={props.selectedModel} data-mode={props.mode} data-draft={props.tabDraft?.text ?? ""}><button data-testid="send" onClick={() => props.onSubmit("queued-A", [])}>Send fixture</button><button data-testid="agent" onClick={() => props.onMode("agent")}>Agent mode</button><button data-testid="select-model-b" onClick={() => props.onSelectModel("api::model-B")}>Select model B</button><button data-testid="cancel-edit" onClick={() => props.onCancelEdit?.()}>Cancel edit</button></div>),
 }));
 let root: Root, container: HTMLDivElement;
 beforeEach(() => {
@@ -489,6 +489,19 @@ describe("conversation message actions", () => {
     vi.mocked(vscode.postMessage).mockClear();
     act(() => container.querySelector<HTMLButtonElement>('.msg.user.editing [data-testid="send"]')!.click());
     expect(vscode.postMessage).toHaveBeenCalledWith({ type: "sendMessage", convId: "A", text: "queued-A", attachments: undefined, fromIndex: 2, model: "api::model-A", mode: "ask", revertFiles: false });
+  });
+
+  it("keeps an in-progress edit open when clicking elsewhere and closes it only via Cancel", () => {
+    initial({ turns: history, runningConvIds: [] });
+    act(() => container.querySelectorAll<HTMLButtonElement>('[aria-label="Edit message"]')[1].click());
+    const outside = container.querySelector<HTMLElement>(".msg.user:not(.editing) .bubble")!;
+    act(() => {
+      outside.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    expect(container.querySelectorAll(".msg.user.editing")).toHaveLength(1);
+    act(() => container.querySelector<HTMLButtonElement>('.msg.user.editing [data-testid="cancel-edit"]')!.click());
+    expect(container.querySelector(".msg.user.editing")).toBeNull();
   });
 
   it("keeps file-change confirmation before retrying a response", () => {

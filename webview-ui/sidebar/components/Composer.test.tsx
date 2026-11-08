@@ -324,6 +324,15 @@ it("keeps the model picker available in edit composers without approval controls
   expect(container.querySelector('[aria-label="Choose model"]')).not.toBeNull();
 });
 
+it("offers an explicit Cancel button in edit composers", () => {
+  const onCancelEdit = vi.fn();
+  act(() => root.render(<Composer {...props} editing initialText="Edit this" onCancelEdit={onCancelEdit} />));
+  const cancel = container.querySelector<HTMLButtonElement>('[aria-label="Cancel edit"]')!;
+  expect(cancel.textContent?.trim()).toBe("Cancel");
+  act(() => cancel.click());
+  expect(onCancelEdit).toHaveBeenCalledOnce();
+});
+
 it("navigates chat modes with arrows, Home/End and typeahead, then restores focus without scrolling", () => {
   act(() => root.render(<Composer {...props} />));
   const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Choose mode"]')!;

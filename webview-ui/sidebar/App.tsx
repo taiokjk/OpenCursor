@@ -1935,17 +1935,8 @@ export function App() {
     }
   };
 
-  // Clicking outside the inline edit composer cancels the edit.
-  React.useEffect(() => {
-    if (editingIndex === null) return;
-    const h = (e: MouseEvent) => {
-      // Portaled dropdowns (model picker / mode menu) live in document.body.
-      if (!(e.target as HTMLElement).closest(".msg.user.editing, .modal-overlay, .model-picker, .mode-dropdown")) setEditingIndex(null);
-    };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [editingIndex]);
-
+  // Edits are only dismissed explicitly (Cancel button / Esc) so clicking
+  // elsewhere never discards what the user typed.
   const startEdit = (index: number, _turn: UserTurn) => {
     if (isRunning) return;
     setEditingIndex(index);
