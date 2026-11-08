@@ -104,6 +104,8 @@ export interface PendingChangeInfo {
   existedBefore: boolean;
   added?: number;
   removed?: number;
+  /** Latest conversation turn index that edited this file (-1 when unowned). */
+  lastTurn?: number;
 }
 
 // Extension -> webview

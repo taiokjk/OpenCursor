@@ -502,6 +502,26 @@ describe("conversation message actions", () => {
     expect(vscode.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "sendMessage", text: "First request", fromIndex: 0, revertFiles: true }));
   });
 
+  it("only offers to revert files changed since the chosen message", () => {
+    initial({ turns: history, runningConvIds: [] });
+    message({ type: "pendingChanges", changes: [
+      { path: "src/early.ts", type: "modified", existedBefore: true, lastTurn: 1 },
+      { path: "src/late.ts", type: "modified", existedBefore: true, lastTurn: 2 },
+    ] });
+    vi.mocked(vscode.postMessage).mockClear();
+    // History: [0]=user, [1]=assistant, [2]=user, [3]=assistant. Retrying the
+    // last response resends turn 2; only src/late.ts was changed since then.
+    const retries = container.querySelectorAll<HTMLButtonElement>('[aria-label="Retry response"]');
+    act(() => retries[retries.length - 1].click());
+    expect(container.querySelector(".modal-body")?.textContent).toContain("1 file was changed since that message");
+    act(() => container.querySelector<HTMLButtonElement>(".modal-actions .btn-ghost")!.click());
+
+    message({ type: "pendingChanges", changes: [{ path: "src/early.ts", type: "modified", existedBefore: true, lastTurn: 1 }] });
+    act(() => retries[retries.length - 1].click());
+    expect(container.querySelector(".modal-title")).toBeNull();
+    expect(vscode.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "sendMessage", fromIndex: 2, revertFiles: false }));
+  });
+
   it("restores an earlier message as a draft without starting another run", () => {
     initial({ turns: history, runningConvIds: [] });
     vi.mocked(vscode.postMessage).mockClear();

@@ -177,6 +177,11 @@ function groupBlocks(blocks: AssistantBlock[]): RenderItem[] {
   return out;
 }
 
+/** Files a revert to turn `index` would undo: those edited at or after that turn. */
+function changesSince(changes: PendingChangeInfo[], index: number): PendingChangeInfo[] {
+  return changes.filter((change) => change.lastTurn === undefined || change.lastTurn >= index);
+}
+
 // Each user prompt stays pinned within its own response. Leading assistant
 // turns form a separate group without a pinned prompt.
 function groupTurns(turns: Turn[]): { turn: Turn; index: number }[][] {
@@ -1955,7 +1960,7 @@ export function App() {
   // user whether to revert them first; otherwise resend straight away.
   const requestEditSubmit = (index: number, text: string, attachments: Attachment[]) => {
     if (isRunning) return;
-    if (pendingChanges.length > 0) {
+    if (changesSince(pendingChanges, index).length > 0) {
       setRevertPrompt({ index, text, attachments });
     } else {
       commitEdit(index, text, attachments, false);
@@ -1966,7 +1971,7 @@ export function App() {
   // bottom composer as an unsent draft.
   const requestRevert = (index: number, turn: UserTurn) => {
     if (isRunning) return;
-    if (pendingChanges.length > 0) {
+    if (changesSince(pendingChanges, index).length > 0) {
       setRevertPrompt({ index, text: turn.text, attachments: turn.attachments ?? [], restore: true });
     } else {
       restoreMessage(index, turn.text, turn.attachments ?? [], false);
@@ -2498,12 +2503,14 @@ export function App() {
       </div>
 
       <ImagePreview images={imagePreview?.images ?? []} activeId={imagePreview?.activeId ?? null} onClose={() => setImagePreview(null)} />
-      {revertPrompt && (
+      {revertPrompt && (() => {
+        const since = changesSince(pendingChanges, revertPrompt.index).length;
+        return (
         <div className="modal-overlay" onClick={() => setRevertPrompt(null)}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="modal-title">Revert file changes?</div>
             <div className="modal-body">
-              Resending from an earlier message will remove the messages after it. You have {pendingChanges.length} pending file change{pendingChanges.length > 1 ? "s" : ""} — revert them too?
+              Resending from an earlier message will remove the messages after it. {since} file{since === 1 ? " was" : "s were"} changed since that message — revert {since === 1 ? "it" : "them"} too?
             </div>
             <div className="modal-actions">
               <button className="btn-ghost" onClick={() => setRevertPrompt(null)}>Cancel</button>
@@ -2512,7 +2519,8 @@ export function App() {
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
     </ModelPickerContext.Provider>
   );
