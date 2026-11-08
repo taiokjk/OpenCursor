@@ -177,6 +177,17 @@ export function changedLinesSince(before: string, after: string, current: string
   return [...lines].sort((a, b) => a - b);
 }
 
+/** Where line `line` of `after` sits in `current`, following insertions and deletions made since. */
+export function mapLineForward(after: string, current: string, line: number): number {
+  let offset = 0;
+  for (const h of computeHunks(after, current)) {
+    if (line < h.beforeStart) break;
+    if (line < h.beforeEnd) return h.startLine;
+    offset = h.startLine + h.afterLines.length - h.beforeEnd;
+  }
+  return line + offset;
+}
+
 export function makeDiff(_filePath: string, before: string, after: string): string {
   const out: string[] = [];
   let chars = 0;

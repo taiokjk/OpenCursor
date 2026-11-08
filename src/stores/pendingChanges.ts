@@ -340,26 +340,31 @@ export class PendingChangesStore {
       const selected = records.filter((r) => matches(r, scope));
       if (!selected.length) return;
       if (selected.length !== records.length) throw new Error("This file contains changes from another conversation. Review the whole change before undoing individual hunks.");
-      const first = selected[0], last = selected[selected.length - 1];
-      if (new Set(selected.map((record) => JSON.stringify(record.owner))).size > 1) {
-        throw new Error("Partial review spans multiple conversations or turns. Review the whole file to preserve change ownership.");
-      }
       if (selected.some((r) => r.previewOnly)) throw new Error("Partial undo is unavailable for binary or large files; review and undo the whole file.");
-      const snapshot = await readSnapshot(canonical);
-      if (fileDigest(snapshot.data) !== last.afterDigest) throw new Error(`Cannot update hunk in ${file}: the file has newer changes. Current content was preserved.`);
+      const first = selected[0], last = selected[selected.length - 1];
       const h = computeHunks(first.before, last.after)[index];
       if (!h) return;
       const beforeLines = first.before.length ? first.before.split("\n") : [];
       const afterLines = last.after.length ? last.after.split("\n") : [];
       if (reject) afterLines.splice(h.startLine, h.afterLines.length, ...h.beforeLines);
       else beforeLines.splice(h.beforeStart, h.beforeLines.length, ...h.afterLines);
-      const before = Buffer.from(beforeLines.join("\n"));
-      const after = Buffer.from(afterLines.join("\n"));
-      await assertCurrentFile(snapshot);
-      if (reject) await atomicReplace(canonical, after, snapshot.mode, undefined, () => assertCurrentFile(snapshot));
+      const before = beforeLines.join("\n");
+      const after = afterLines.join("\n");
+      const snapshot = await readSnapshot(canonical);
+      if (reject) {
+        // Undo just this block on the current file so the user's separate edits survive.
+        const view = textView(snapshot.data);
+        if (snapshot.data === null || view.previewOnly) throw new Error(`Cannot undo a block in ${file}: the file is no longer readable as text. Current content was preserved.`);
+        const merged = revertOnto(after, last.after, view.text);
+        if (merged === null) throw new Error(`Cannot undo this block in ${file}: its lines were edited after the agent. Current content was preserved.`);
+        await atomicReplace(canonical, Buffer.from(merged), snapshot.mode, undefined, () => assertCurrentFile(snapshot));
+      }
+      // The block is done. Whatever remains is folded into one record owned by
+      // the latest edit, even when it spanned several messages or conversations.
+      const existedBefore = first.existedBefore || (!reject && before.length > 0);
       await this.commitState(() => {
         for (const record of [...records]) this.discard(key, record);
-        if (!before.equals(after)) this.addRecord(canonical, first.existedBefore ? before : null, after, first.owner);
+        if (before !== after) this.addRecord(canonical, existedBefore ? Buffer.from(before) : null, Buffer.from(after), last.owner, undefined, first.originalMode);
       });
     });
   }

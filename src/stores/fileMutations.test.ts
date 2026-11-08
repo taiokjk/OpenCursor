@@ -79,11 +79,13 @@ describe("production file transactions and undo", () => {
     expect(pendingChanges.has(file)).toBe(false);
     expect(pendingChanges.count()).toBe(0);
   });
-  it("refuses stale hunk undo but reverts only the agent's lines around a separate user edit", async () => {
+  it("reverts only the agent's lines around a separate user edit, for a block or the whole file", async () => {
     const file = path.join(root, "manual.txt"); await fs.writeFile(file, "original\n");
     await writeTool.execute({ path: file, contents: "agent\n" }); await fs.appendFile(file, "manual\n");
-    await expect(pendingChanges.rejectHunk(file, 0)).rejects.toThrow("newer changes");
-    expect(await fs.readFile(file, "utf8")).toBe("agent\nmanual\n"); expect(pendingChanges.has(file)).toBe(true);
+    await pendingChanges.rejectHunk(file, 0);
+    expect(await fs.readFile(file, "utf8")).toBe("original\nmanual\n"); expect(pendingChanges.has(file)).toBe(false);
+    await fs.writeFile(file, "original\n");
+    await writeTool.execute({ path: file, contents: "agent\n" }); await fs.appendFile(file, "manual\n");
     await pendingChanges.reject(file);
     expect(await fs.readFile(file, "utf8")).toBe("original\nmanual\n"); expect(pendingChanges.has(file)).toBe(false);
   });
@@ -144,14 +146,27 @@ describe("production file transactions and undo", () => {
     expect(await fs.readFile(otherFile, "utf8")).toBe("after");
     expect(await fs.readFile(path.join(moved, "code.txt"), "utf8")).toBe("before");
   });
-  it("does not reassign other conversations' changes during partial hunk review", async () => {
+  it("reviews single blocks of a file edited by several conversations, treating each as done", async () => {
     const file = path.join(root, "mixed-hunks"); await fs.writeFile(file, "a\nb\nc");
     await strReplaceTool.execute({ path: file, old_string: "a", new_string: "A" }, undefined, undefined, context("A"));
     await strReplaceTool.execute({ path: file, old_string: "c", new_string: "C" }, undefined, undefined, context("B"));
-    await expect(pendingChanges.acceptHunk(file, 0)).rejects.toThrow("multiple conversations or turns");
-    expect(pendingChanges.list({ conversationId: "A" })).toHaveLength(1);
-    expect(pendingChanges.list({ conversationId: "B" })).toHaveLength(1);
-    expect(await fs.readFile(file, "utf8")).toBe("A\nb\nC");
+    await pendingChanges.acceptHunk(file, 0);
+    expect(pendingChanges.hunks(file)).toHaveLength(1);
+    expect(pendingChanges.get(file)?.before).toBe("A\nb\nc");
+    await pendingChanges.rejectHunk(file, 0);
+    expect(await fs.readFile(file, "utf8")).toBe("A\nb\nc");
+    expect(pendingChanges.has(file)).toBe(false);
+  });
+  it("rejects one block while keeping the user's separate edits and other blocks", async () => {
+    const file = path.join(root, "block-merge"); await fs.writeFile(file, "a\nb\nc\nd\ne");
+    await writeTool.execute({ path: file, contents: "A\nb\nc\nd\nE" });
+    await fs.writeFile(file, "A\nb\nmine\nd\nE");
+    await pendingChanges.rejectHunk(file, 1);
+    expect(await fs.readFile(file, "utf8")).toBe("A\nb\nmine\nd\ne");
+    expect(pendingChanges.hunks(file)).toHaveLength(1);
+    await fs.writeFile(file, "A edited\nb\nmine\nd\ne");
+    await expect(pendingChanges.rejectHunk(file, 0)).rejects.toThrow("edited after the agent");
+    expect(await fs.readFile(file, "utf8")).toBe("A edited\nb\nmine\nd\ne");
   });
   it("refuses dirty editor files", async () => {
     const file = path.join(root, "dirty"); await fs.writeFile(file, "disk");
