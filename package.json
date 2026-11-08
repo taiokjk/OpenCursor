@@ -68,6 +68,24 @@
 			{
 				"command": "ocursor.implementTodo",
 				"title": "OpenCursor: Implement TODO"
+			},
+			{
+				"command": "ocursor.acceptFileChanges",
+				"title": "Accept Agent Changes in This File",
+				"category": "OpenCursor",
+				"icon": "$(check)"
+			},
+			{
+				"command": "ocursor.acceptAllChanges",
+				"title": "Accept All Agent Changes",
+				"category": "OpenCursor",
+				"icon": "$(check-all)"
+			},
+			{
+				"command": "ocursor.rejectAllChanges",
+				"title": "Reject All Agent Changes",
+				"category": "OpenCursor",
+				"icon": "$(discard)"
 			}
 		],
 		"keybindings": [
@@ -83,6 +101,35 @@
 				{
 					"command": "ocursor.implementTodo",
 					"when": "false"
+				},
+				{
+					"command": "ocursor.acceptFileChanges",
+					"when": "resourcePath in ocursor.agentChangedFiles"
+				},
+				{
+					"command": "ocursor.acceptAllChanges",
+					"when": "ocursor.agentChangedFiles"
+				},
+				{
+					"command": "ocursor.rejectAllChanges",
+					"when": "ocursor.agentChangedFiles"
+				}
+			],
+			"editor/title": [
+				{
+					"command": "ocursor.acceptFileChanges",
+					"when": "resourceScheme == file && resourcePath in ocursor.agentChangedFiles",
+					"group": "navigation@1"
+				},
+				{
+					"command": "ocursor.acceptAllChanges",
+					"when": "resourceScheme == file && resourcePath in ocursor.agentChangedFiles",
+					"group": "navigation@2"
+				},
+				{
+					"command": "ocursor.rejectAllChanges",
+					"when": "resourceScheme == file && resourcePath in ocursor.agentChangedFiles",
+					"group": "navigation@3"
 				}
 			]
 		},

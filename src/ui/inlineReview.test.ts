@@ -75,6 +75,38 @@ it("labels standalone file reviews as an aggregate and retains the live file doc
   expect(host.provider.provideTextDocumentContent(call[1])).toBe("before");
 });
 
+it("publishes changed files for editor title actions and accepts one file or all files from them", async () => {
+  vi.useFakeTimers(); registerInlineReview({ subscriptions } as any);
+  const one = "C:/fixture/one.txt", two = "C:/fixture/two.txt";
+  pendingChanges.record(one, "a", "b", true, { conversationId: "chat" });
+  pendingChanges.record(two, "a", "b", true, { conversationId: "chat" });
+  await vi.advanceTimersByTimeAsync(100);
+  const contexts = () => host.execute.mock.calls.filter(call => call[0] === "setContext" && call[1] === "ocursor.agentChangedFiles");
+  expect(contexts().at(-1)?.[2]).toEqual(expect.arrayContaining([pendingChanges.get(one)!.path, pendingChanges.get(two)!.path]));
+  await host.commands.get("ocursor.acceptFileChanges")!(vscode.Uri.file(pendingChanges.get(one)!.path));
+  expect(pendingChanges.has(one)).toBe(false);
+  expect(pendingChanges.has(two)).toBe(true);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(contexts().at(-1)?.[2]).toEqual([pendingChanges.get(two)!.path]);
+  await host.commands.get("ocursor.acceptAllChanges")!();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(pendingChanges.count()).toBe(0);
+  expect(contexts().at(-1)?.[2]).toEqual([]);
+});
+
+it("highlights only the agent's lines, not the user's separate edits", async () => {
+  vi.useFakeTimers(); registerInlineReview({ subscriptions } as any);
+  const file = "C:/fixture/attribution.txt";
+  pendingChanges.record(file, "a\nb\nc", "a\nB\nc", true, { conversationId: "chat" });
+  await vi.advanceTimersByTimeAsync(100);
+  const text = "user\na\nB\nC";
+  const editor = { setDecorations: vi.fn(), document: { uri: vscode.Uri.file(pendingChanges.list()[0].path), getText: () => text, lineCount: 4, lineAt: (line: number) => ({ text: text.split("\n")[line] }) } };
+  (vscode.window.visibleTextEditors as any[]).push(editor);
+  host.onChange({ document: editor.document, contentChanges: [{}] });
+  await vi.advanceTimersByTimeAsync(200);
+  expect(editor.setDecorations.mock.calls.at(-1)![1].map((range: any) => range.range[0])).toEqual([2]);
+});
+
 it("refreshes only the typed editor's highlights and never re-publishes diff originals per keystroke", async () => {
   vi.useFakeTimers(); registerInlineReview({ subscriptions } as any);
   const file = "C:/fixture/typing.txt";

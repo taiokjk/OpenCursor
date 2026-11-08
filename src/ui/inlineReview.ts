@@ -8,7 +8,8 @@
  */
 
 import * as vscode from "vscode";
-import { computeHunks, pendingChanges, type ChangeScope, type PendingChange } from "../stores/pendingChanges";
+import { pendingChanges, type ChangeScope, type PendingChange } from "../stores/pendingChanges";
+import { changedLinesSince } from "../shared/lineDiff";
 import { safePath } from "../context/workspaceUtils";
 import { createHash } from "node:crypto";
 
@@ -145,18 +146,56 @@ function refreshEditor(editor: vscode.TextEditor) {
     return;
   }
   decorated.add(editor);
-  // Diff against the live document text so highlights stay correct if the user
-  // keeps typing after the agent's edit.
-  const hunks = computeHunks(change.before, editor.document.getText());
+  // Track the agent's lines through the live text so the user's own unrelated
+  // edits are never painted as agent changes.
   const lastLine = Math.max(editor.document.lineCount - 1, 0);
   const added: vscode.Range[] = [];
-  for (const h of hunks) {
-    if (!h.afterLines.length) continue;
-    const start = Math.min(h.startLine, lastLine);
-    const end = Math.min(h.endLine, lastLine);
-    added.push(new vscode.Range(start, 0, end, editor.document.lineAt(end).text.length));
+  for (const line of changedLinesSince(change.before, change.after, editor.document.getText())) {
+    if (line > lastLine) break;
+    added.push(new vscode.Range(line, 0, line, editor.document.lineAt(line).text.length));
   }
   editor.setDecorations(addedDecoration, added);
+}
+
+/** Lets editor title actions appear only on files with pending agent edits. */
+const CHANGED_FILES_CONTEXT = "ocursor.agentChangedFiles";
+let publishedContext: string | undefined;
+function publishChangedFilesContext() {
+  const paths = [...pendingByPath().keys()];
+  const key = paths.join("\n");
+  if (key === publishedContext) return;
+  publishedContext = key;
+  void vscode.commands.executeCommand("setContext", CHANGED_FILES_CONTEXT, paths);
+}
+
+function editorFilePath(uri?: vscode.Uri): string | undefined {
+  const target = uri ?? vscode.window.activeTextEditor?.document.uri;
+  return target?.scheme === "file" ? target.fsPath : undefined;
+}
+
+/**
+ * Rejection works on disk, so unsaved typing in the file must be saved first;
+ * otherwise the store would refuse to touch a dirty document.
+ */
+async function ensureSaved(paths: string[]): Promise<boolean> {
+  const dirty = vscode.workspace.textDocuments.filter(doc => doc.isDirty && doc.uri.scheme === "file" && paths.includes(doc.uri.fsPath));
+  if (!dirty.length) return true;
+  const choice = await vscode.window.showWarningMessage(
+    `Save your unsaved edits in ${dirty.length === 1 ? dirty[0].uri.fsPath.split(/[\\/]/).pop() : `${dirty.length} files`} before rejecting the agent's changes? Your edits are kept.`,
+    { modal: true }, "Save and Reject");
+  if (choice !== "Save and Reject") return false;
+  for (const doc of dirty) if (!await doc.save()) return false;
+  return true;
+}
+
+async function runReviewAction(action: () => Promise<void>) {
+  try { await action(); }
+  catch (error) { void vscode.window.showErrorMessage(`OpenCursor: ${error instanceof Error ? error.message : String(error)}`); }
+}
+
+function pendingPathFor(uri?: vscode.Uri): string | undefined {
+  const file = editorFilePath(uri);
+  return file ? pendingByPath().get(file)?.path : undefined;
 }
 
 let refreshTimer: NodeJS.Timeout | undefined;
@@ -183,6 +222,7 @@ async function sync() {
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document.uri.scheme === "file") refreshEditor(editor);
   }
+  publishChangedFilesContext();
 }
 
 function scheduleSync() {
@@ -220,9 +260,20 @@ export function registerInlineReview(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("ocursor.viewDiff", async (path: string, scope?: ChangeScope) => {
       await showInlineDiff(path, false, scope);
     }),
+    // Editor title actions receive the editor's URI; the palette falls back to the active editor.
+    vscode.commands.registerCommand("ocursor.acceptFileChanges", (uri?: vscode.Uri) => runReviewAction(async () => {
+      const file = pendingPathFor(uri);
+      if (file) await pendingChanges.accept(file);
+    })),
+    vscode.commands.registerCommand("ocursor.acceptAllChanges", () => runReviewAction(() => pendingChanges.acceptAll())),
+    vscode.commands.registerCommand("ocursor.rejectAllChanges", () => runReviewAction(async () => {
+      const paths = [...pendingByPath().keys()];
+      if (!paths.length || !await ensureSaved(paths)) return;
+      await pendingChanges.rejectAll();
+    })),
     addedDecoration,
     originalsChanged,
-    { dispose: () => { if (refreshTimer) clearTimeout(refreshTimer); if (typingTimer) clearTimeout(typingTimer); typingTimer = undefined; typedDocuments.clear(); } },
+    { dispose: () => { if (refreshTimer) clearTimeout(refreshTimer); if (typingTimer) clearTimeout(typingTimer); typingTimer = undefined; typedDocuments.clear(); publishedContext = undefined; } },
     { dispose: pendingChanges.onChange(scheduleSync) },
     vscode.window.onDidChangeVisibleTextEditors(() => {
       for (const editor of vscode.window.visibleTextEditors) {

@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { durableWrite } from "./durableFiles";
 import { safePath } from "../context/workspaceUtils";
-import { computeHunks, type Hunk } from "../shared/lineDiff";
+import { computeHunks, revertOnto, type Hunk } from "../shared/lineDiff";
 import { withPathLock, assertCurrentFile, readSnapshot, atomicReplace, canonicalFilePathSync } from "./fileMutations";
 export { computeHunks, type Hunk } from "../shared/lineDiff";
 
@@ -293,10 +293,15 @@ export class PendingChangesStore {
           // Recovery after the file was restored but the journal save failed.
           await this.commitState(() => this.discard(this.key(record.path), record)); continue;
         }
-        if (fileDigest(snapshot.data) !== record.afterDigest) {
-          throw new Error(`Cannot undo ${file}: it changed after this agent edit. Save or reconcile the newer changes first; no conflicting content was overwritten.`);
+        let original: Buffer | null;
+        if (fileDigest(snapshot.data) === record.afterDigest) original = await this.original(record);
+        else {
+          // The file was edited after the agent: undo only the agent's lines and
+          // keep the newer edits, unless they touch the same lines.
+          const merged = this.mergeUndo(record, snapshot.data);
+          if (merged === null) throw new Error(`Cannot undo ${file}: it changed after this agent edit in the same lines. Save or reconcile the newer changes first; no conflicting content was overwritten.`);
+          original = merged;
         }
-        const original = await this.original(record);
         await atomicReplace(canonical, original, record.originalMode ?? snapshot.mode, undefined, async () => {
           await assertCurrentFile(snapshot);
           if (!this.changes.get(key)?.includes(record)) throw new Error(`Cannot undo ${file}: the change was already accepted or replaced.`);
@@ -304,6 +309,15 @@ export class PendingChangesStore {
         await this.commitState(() => this.discard(this.key(record.path), record));
       }
     });
+  }
+  /** Three-way undo of a text edit onto newer file contents; null when it cannot be separated safely. */
+  private mergeUndo(record: EditRecord, current: Buffer | null): Buffer | null {
+    // A created file, deleted file, or binary/truncated preview has no reliable line base.
+    if (current === null || !record.existedBefore || record.afterDigest === null || record.previewOnly) return null;
+    const view = textView(current);
+    if (view.previewOnly) return null;
+    const merged = revertOnto(record.before, record.after, view.text);
+    return merged === null ? null : Buffer.from(merged);
   }
   async rejectAll(scope?: ChangeScope): Promise<void> {
     const errors: string[] = [];
