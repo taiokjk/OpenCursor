@@ -825,25 +825,20 @@ function QuestionCard({ block }: { block: ToolBlock }) {
     id: typeof q?.id === "string" ? q.id : undefined,
   }));
   const answered = block.status !== "running";
-  const [step, setStep] = React.useState(0);
   const [answers, setAnswers] = React.useState<Record<string, string[]>>(block.answers ?? {});
   const [custom, setCustom] = React.useState<Record<string, string>>({});
   const [customMode, setCustomMode] = React.useState<Record<string, boolean>>({});
+  const [skipped, setSkipped] = React.useState<Record<string, boolean>>({});
   const [sent, setSent] = React.useState(false);
+  const sections = React.useRef<Array<HTMLElement | null>>([]);
 
   if (questions.length === 0) return null;
 
-  const q = questions[step];
-  const opts = q.options || [];
-  const sel = answers[String(step)] || [];
-  const customText = custom[String(step)] || "";
-  const customSelected = customMode[String(step)] || false;
-  const setCustomSelected = (on: boolean) => setCustomMode((c) => ({ ...c, [String(step)]: on }));
-  const isChoices = !q.type || q.type === "choices";
-  const structuredValue = custom[String(step)] || "";
+  // Skipped drafts are kept so un-skipping restores them, but never sent.
   const answerFor = (index: number): string[] => {
     const item = questions[index];
     const key = String(index);
+    if (skipped[key] && !item.required) return [];
     const text = (custom[key] || "").trim();
     if (item.type && item.type !== "choices") return text ? [text] : [];
     const selected = answers[key] || [];
@@ -853,49 +848,46 @@ function QuestionCard({ block }: { block: ToolBlock }) {
   };
   const validAnswer = (item: QItem, answer: string[]) => (!item.required || answer.length > 0)
     && (item.type !== "date" || !answer.length || isValidDate(answer[0]));
-  const isValid = validAnswer(q, answerFor(step));
+  const allValid = questions.every((item, i) => validAnswer(item, answerFor(i)));
 
-  const toggle = (opt: string) => {
-    if (!q.multiple) setCustomSelected(false);
+  const setText = (index: number, value: string) => setCustom((c) => ({ ...c, [String(index)]: value }));
+  const toggle = (index: number, opt: string) => {
+    const key = String(index);
+    const multiple = questions[index].multiple;
+    if (!multiple) setCustomMode((c) => ({ ...c, [key]: false }));
     setAnswers((a) => {
-      const cur = a[String(step)] || [];
-      if (q.multiple) {
-        return { ...a, [String(step)]: cur.includes(opt) ? cur.filter((x) => x !== opt) : [...cur, opt] };
-      }
-      return { ...a, [String(step)]: [opt] };
+      const cur = a[key] || [];
+      if (multiple) return { ...a, [key]: cur.includes(opt) ? cur.filter((x) => x !== opt) : [...cur, opt] };
+      return { ...a, [key]: [opt] };
     });
   };
-  const pickCustom = () => {
-    if (!q.multiple) setAnswers((a) => ({ ...a, [String(step)]: [] }));
-    setCustomSelected(true);
+  const toggleCustom = (index: number) => {
+    const key = String(index);
+    const on = !customMode[key];
+    if (on && !questions[index].multiple) setAnswers((a) => ({ ...a, [key]: [] }));
+    setCustomMode((c) => ({ ...c, [key]: on }));
   };
-  const submit = (skipCurrent = false) => {
-    if (sent || (skipCurrent && q.required)) return;
-    const final = Object.fromEntries(questions.map((_, i) => [String(i), skipCurrent && i === step ? [] : answerFor(i)]));
+  const toggleSkip = (index: number) => setSkipped((s) => ({ ...s, [String(index)]: !s[String(index)] }));
+
+  const submit = () => {
+    if (sent) return;
+    const final = Object.fromEntries(questions.map((_, i) => [String(i), answerFor(i)]));
     const missing = questions.findIndex((item, i) => !validAnswer(item, final[String(i)]));
     if (missing !== -1) {
-      setStep(missing);
+      sections.current[missing]?.querySelector<HTMLElement>("textarea, input, button")?.focus();
       return;
     }
     setAnswers(final);
     setSent(true);
     post({ type: "answerQuestion", callId: block.callId, answers: final });
   };
-  const advance = () => {
-    if (!isValid) return;
-    setStep((s) => s + 1);
-  };
-  const last = step === questions.length - 1;
-  const skip = () => {
-    if (q.required) return;
-    if (last) {
-      submit(true);
-    } else {
-      setAnswers((a) => ({ ...a, [String(step)]: [] }));
-      setCustom((c) => ({ ...c, [String(step)]: "" }));
-      setCustomSelected(false);
-      setStep((s) => s + 1);
-    }
+  // Enter moves to the next question's first control; on the last question it accepts.
+  const onFieldKey = (index: number) => (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    const next = sections.current.slice(index + 1).find((section) => section && !section.classList.contains("skipped"));
+    if (next) next.querySelector<HTMLElement>("textarea, input, .qc-option")?.focus();
+    else submit();
   };
 
   if (answered || sent) {
@@ -919,84 +911,94 @@ function QuestionCard({ block }: { block: ToolBlock }) {
     <div className="question-card">
       <div className="qc-head">
         <span><Icon name="chat" size={14} /> {header}</span>
-        <span className="qc-step">{step + 1} of {questions.length}</span>
+        {questions.length > 1 && <span className="qc-step">{questions.length} questions</span>}
       </div>
-      <div className="qc-question">{step + 1}. {q.question}{q.required && <span className="qc-required">*</span>}</div>
-      {isChoices ? (
-        <>
-          {opts.map((opt, oi) => (
-            <button
-              key={oi}
-              className={"qc-option" + (sel.includes(opt) && !(!q.multiple && customSelected) ? " selected" : "")}
-              aria-pressed={sel.includes(opt) && !(!q.multiple && customSelected)}
-              onClick={() => toggle(opt)}
-            >
-              <span className="qc-key">{String.fromCharCode(65 + oi)}</span>
-              <span>{opt}</span>
-            </button>
-          ))}
-          <button
-            className={"qc-option qc-option-custom" + (customSelected ? " selected" : "")}
-            aria-pressed={customSelected}
-            onClick={() => (customSelected ? setCustomSelected(false) : pickCustom())}
+      {questions.map((q, index) => {
+        const key = String(index);
+        const isSkipped = !!skipped[key] && !q.required;
+        const opts = q.options || [];
+        const sel = answers[key] || [];
+        const customSelected = !!customMode[key];
+        const text = custom[key] || "";
+        const isChoices = !q.type || q.type === "choices";
+        const autoFocus = index === 0;
+        const answerBox = (label: string, placeholder: string, focus: boolean) => (
+          <textarea
+            className="qc-textarea"
+            rows={1}
+            aria-label={label}
+            aria-required={q.required || undefined}
+            placeholder={placeholder}
+            autoFocus={focus}
+            value={text}
+            onChange={(e) => setText(index, e.target.value)}
+            onKeyDown={q.type === "textArea" ? undefined : onFieldKey(index)}
+          />
+        );
+        return (
+          <section
+            key={index}
+            ref={(el) => { sections.current[index] = el; }}
+            className={"qc-item" + (isSkipped ? " skipped" : "")}
+            aria-label={`Question ${index + 1}`}
           >
-            <span className="qc-key">{String.fromCharCode(65 + opts.length)}</span>
-            <span>Other…</span>
-          </button>
-          {customSelected && (
-            <input
-              className="qc-custom"
-              aria-label={`${q.question}: Custom answer`}
-              placeholder="Type a custom answer…"
-              autoFocus
-              value={customText}
-              onChange={(e) => setCustom((c) => ({ ...c, [String(step)]: e.target.value }))}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") (last ? submit() : advance());
-              }}
-            />
-          )}
-        </>
-      ) : (
-        <div className="qc-structured">
-          {q.type === "textArea" ? (
-            <textarea
-              className="qc-textarea"
-              aria-label={q.question}
-              aria-required={q.required || undefined}
-              placeholder={q.placeholder || "Type your answer…"}
-              autoFocus
-              value={structuredValue}
-              onChange={(e) => setCustom((c) => ({ ...c, [String(step)]: e.target.value }))}
-            />
-          ) : q.type === "date" ? (
-            <DateField value={structuredValue} label={q.question} placeholder={q.placeholder}
-              autoFocus required={q.required} onChange={value => setCustom(c => ({ ...c, [String(step)]: value }))}
-              onKeyDown={event => { if (event.key === "Enter") (last ? submit() : advance()); }} />
-          ) : (
-            <input
-              className="qc-input"
-              type={q.type === "number" ? "number" : "text"}
-              aria-label={q.question}
-              aria-required={q.required || undefined}
-              placeholder={q.placeholder || "Type your answer…"}
-              autoFocus
-              value={structuredValue}
-              onChange={(e) => setCustom((c) => ({ ...c, [String(step)]: e.target.value }))}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") (last ? submit() : advance());
-              }}
-            />
-          )}
-        </div>
-      )}
+            <div className="qc-item-head">
+              <div className="qc-question">{index + 1}. {q.question}{q.required && <span className="qc-required">*</span>}</div>
+              {!q.required && (
+                <button type="button" className="qc-skip" aria-pressed={isSkipped} onClick={() => toggleSkip(index)}>
+                  {isSkipped ? "Answer" : "Skip"}
+                </button>
+              )}
+            </div>
+            {isSkipped ? (
+              <div className="qc-skipped-note">Skipped</div>
+            ) : isChoices ? (
+              <>
+                {opts.map((opt, oi) => {
+                  const on = sel.includes(opt) && !(!q.multiple && customSelected);
+                  return (
+                    <button key={oi} type="button" className={"qc-option" + (on ? " selected" : "")} aria-pressed={on} onClick={() => toggle(index, opt)}>
+                      <span className="qc-key">{String.fromCharCode(65 + oi)}</span>
+                      <span>{opt}</span>
+                    </button>
+                  );
+                })}
+                <button type="button" className={"qc-option qc-option-custom" + (customSelected ? " selected" : "")} aria-pressed={customSelected} onClick={() => toggleCustom(index)}>
+                  <span className="qc-key">{String.fromCharCode(65 + opts.length)}</span>
+                  <span>Other…</span>
+                </button>
+                {customSelected && answerBox(`${q.question}: Custom answer`, "Type a custom answer…", true)}
+              </>
+            ) : (
+              <div className="qc-structured">
+                {q.type === "date" ? (
+                  <DateField value={text} label={q.question} placeholder={q.placeholder}
+                    autoFocus={autoFocus} required={q.required} onChange={(value) => setText(index, value)}
+                    onKeyDown={onFieldKey(index)} />
+                ) : q.type === "number" ? (
+                  <input
+                    className="qc-input"
+                    type="number"
+                    aria-label={q.question}
+                    aria-required={q.required || undefined}
+                    placeholder={q.placeholder || "Type your answer…"}
+                    autoFocus={autoFocus}
+                    value={text}
+                    onChange={(e) => setText(index, e.target.value)}
+                    onKeyDown={onFieldKey(index)}
+                  />
+                ) : (
+                  answerBox(q.question, q.placeholder || "Type your answer…", autoFocus)
+                )}
+              </div>
+            )}
+          </section>
+        );
+      })}
       <div className="qc-foot">
-        {step > 0 && <button className="qc-nav" onClick={() => setStep((s) => s - 1)}>Back</button>}
+        <span className="qc-hint">Shift+Enter for a new line</span>
         <span className="qc-spacer" />
-        {!q.required && <button className="qc-skip" onClick={skip}>Skip</button>}
-        <button className="qc-next" disabled={!isValid} onClick={() => (last ? submit() : advance())}>
-          {last ? "Submit" : "Continue"}
-        </button>
+        <button type="button" className="qc-next" disabled={!allValid} onClick={submit}>Accept</button>
       </div>
     </div>
   );

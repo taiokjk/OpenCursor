@@ -1613,20 +1613,6 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	color: var(--primary-fg);
 	border-color: transparent;
 }
-.qc-custom {
-	width: 100%;
-	margin-top: 4px;
-	background: var(--control-bg);
-	border: 1px solid var(--input-border);
-	color: var(--fg);
-	border-radius: var(--control-radius);
-	padding: 8px 10px;
-	font-size: 12.5px;
-}
-.qc-custom:focus {
-	outline: none;
-	border-color: var(--control-focus-border);
-}
 .qc-structured {
 	margin-top: 4px;
 }
@@ -1648,9 +1634,59 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	outline: none;
 	border-color: var(--control-focus-border);
 }
+/* Grows with its content up to a cap, then scrolls. */
 .qc-textarea {
-	min-height: 80px;
+	display: block;
+	field-sizing: content;
+	min-height: var(--control-height);
+	max-height: 200px;
+	overflow-y: auto;
 	resize: vertical;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	line-height: 1.45;
+}
+.qc-option + .qc-textarea {
+	margin-top: 4px;
+}
+.qc-item {
+	padding: 10px 0;
+	border-top: 1px solid var(--line-soft);
+}
+.qc-item:first-of-type {
+	border-top: none;
+	padding-top: 0;
+}
+.qc-item-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 8px;
+}
+.qc-item-head .qc-question {
+	min-width: 0;
+}
+.qc-item-head .qc-skip {
+	flex: 0 0 auto;
+	padding: 2px 10px;
+	font-size: 11px;
+}
+.qc-item.skipped .qc-question {
+	color: var(--fg-faint);
+}
+.qc-skipped-note {
+	font-size: 12px;
+	color: var(--fg-faint);
+	font-style: italic;
+}
+.qc-hint {
+	font-size: 11px;
+	color: var(--fg-faint);
+}
+.qc-next:disabled {
+	opacity: 0.5;
+	cursor: default;
+	filter: none;
 }
 .qc-required {
 	color: var(--error, #f44);
@@ -1666,7 +1702,6 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 .qc-spacer {
 	flex: 1;
 }
-.qc-nav,
 .qc-skip {
 	background: transparent;
 	border: 1px solid var(--border);
@@ -1676,7 +1711,6 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	font-size: 12px;
 	cursor: pointer;
 }
-.qc-nav:hover,
 .qc-skip:hover {
 	color: var(--fg);
 }

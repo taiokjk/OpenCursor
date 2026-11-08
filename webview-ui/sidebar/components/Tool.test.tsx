@@ -162,14 +162,14 @@ function click(label: string) {
   act(() => button(label).click());
 }
 
-function field(): HTMLInputElement | HTMLTextAreaElement {
-  const input = container.querySelector("input, textarea");
+function field(index = 0): HTMLInputElement | HTMLTextAreaElement {
+  const input = container.querySelectorAll(".qc-item")[index]?.querySelector("input, textarea");
   if (!input) throw new Error("Missing answer field");
   return input as HTMLInputElement | HTMLTextAreaElement;
 }
 
-function type(value: string) {
-  const input = field();
+function type(value: string, index = 0) {
+  const input = field(index);
   const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   act(() => {
     Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(input, value);
@@ -189,13 +189,13 @@ describe("AskQuestion production form", () => {
     renderQuestions([{ prompt: "Release date", type: "date", required: true }]);
     expect(field().type).toBe("text");
     type("2026-02-29");
-    expect(button("Submit").disabled).toBe(true);
+    expect(button("Accept").disabled).toBe(true);
     expect(field().getAttribute("aria-invalid")).toBe("true");
     act(() => field().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(vscode.postMessage).not.toHaveBeenCalled();
     type("2028-02-29");
-    expect(button("Submit").disabled).toBe(false);
-    click("Submit");
+    expect(button("Accept").disabled).toBe(false);
+    click("Accept");
     expectAnswers({ "0": ["2028-02-29"] });
   });
 
@@ -205,63 +205,85 @@ describe("AskQuestion production form", () => {
   ])("submits a typed %s answer", (typeName, value) => {
     renderQuestions([{ prompt: "Your answer", type: typeName }]);
     type(value);
-    click("Submit");
+    click("Accept");
     expectAnswers({ "0": [value] });
     expect(container.querySelector(".qc-a")?.textContent).toBe(value);
   });
 
   it.each(["text", "textArea", "number", "date"])("requires an answer for %s", (typeName) => {
     renderQuestions([{ prompt: "Required", type: typeName, required: true }]);
-    expect(button("Submit").disabled).toBe(true);
+    expect(button("Accept").disabled).toBe(true);
     expect(container.querySelector(".qc-skip")).toBeNull();
-    click("Submit");
+    click("Accept");
     act(() => field().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(vscode.postMessage).not.toHaveBeenCalled();
     type(typeName === "number" ? "0" : typeName === "date" ? "2026-09-07" : "answer");
-    expect(button("Submit").disabled).toBe(false);
-    click("Submit");
+    expect(button("Accept").disabled).toBe(false);
+    click("Accept");
     expect(vscode.postMessage).toHaveBeenCalledOnce();
   });
 
-  it("blocks Continue and Enter for a required blank field", () => {
+  it("blocks Accept while any required answer is blank", () => {
     renderQuestions([{ prompt: "Required", type: "text", required: true }, { prompt: "Next", type: "text" }]);
     type("   ");
-    click("Continue");
-    act(() => field().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
-    expect(container.querySelector(".qc-step")?.textContent).toBe("1 of 2");
+    type("later", 1);
+    expect(button("Accept").disabled).toBe(true);
+    act(() => field(1).dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(vscode.postMessage).not.toHaveBeenCalled();
   });
 
-  it("preserves earlier answers and edits after going Back", () => {
+  it("shows every question at once and sends all answers with one Accept", () => {
     renderQuestions([{ prompt: "Name", type: "text" }, { prompt: "Count", type: "number" }]);
+    expect(container.querySelectorAll(".qc-item")).toHaveLength(2);
     type("old");
-    click("Continue");
-    type("42");
-    click("Back");
+    type("42", 1);
     type("new");
-    click("Continue");
-    click("Submit");
+    click("Accept");
     expectAnswers({ "0": ["new"], "1": ["42"] });
   });
 
   it("does not submit an old answer after it is cleared", () => {
     renderQuestions([{ prompt: "Name", type: "text" }, { prompt: "Count", type: "number" }]);
     type("old");
-    click("Continue");
-    click("Back");
     type("");
-    click("Continue");
-    click("Submit");
+    click("Accept");
     expectAnswers({ "0": [], "1": [] });
+  });
+
+  it("uses a multi-line answer box where Shift+Enter keeps typing and Enter does not submit early", () => {
+    renderQuestions([{ prompt: "Name", type: "text" }, { prompt: "Notes", type: "text" }]);
+    expect(field()).toBeInstanceOf(HTMLTextAreaElement);
+    const shiftEnter = new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true });
+    act(() => field().dispatchEvent(shiftEnter));
+    expect(shiftEnter.defaultPrevented).toBe(false);
+    type("line one\nline two");
+    act(() => field().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    expect(vscode.postMessage).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(field(1));
+    click("Accept");
+    expectAnswers({ "0": ["line one\nline two"], "1": [] });
+  });
+
+  it("toggles skip per question and restores the draft when un-skipped", () => {
+    renderQuestions([{ prompt: "First", type: "text" }, { prompt: "Second", type: "text" }]);
+    type("keep me");
+    type("drop me", 1);
+    act(() => container.querySelectorAll<HTMLButtonElement>(".qc-skip")[1].click());
+    expect(container.querySelectorAll(".qc-item")[1].classList.contains("skipped")).toBe(true);
+    act(() => container.querySelectorAll<HTMLButtonElement>(".qc-skip")[0].click());
+    act(() => container.querySelectorAll<HTMLButtonElement>(".qc-skip")[0].click());
+    expect(field().value).toBe("keep me");
+    click("Accept");
+    expectAnswers({ "0": ["keep me"], "1": [] });
   });
 
   it("keeps Other answers working and validates required choices", () => {
     renderQuestions([{ prompt: "Choose", options: ["One", "Two"], required: true }]);
-    expect(button("Submit").disabled).toBe(true);
+    expect(button("Accept").disabled).toBe(true);
     act(() => container.querySelector<HTMLButtonElement>(".qc-option-custom")!.click());
-    expect(button("Submit").disabled).toBe(true);
+    expect(button("Accept").disabled).toBe(true);
     type("Three");
-    click("Submit");
+    click("Accept");
     expectAnswers({ "0": ["Three"] });
   });
 
@@ -270,7 +292,7 @@ describe("AskQuestion production form", () => {
     act(() => container.querySelector<HTMLButtonElement>(".qc-option")!.click());
     act(() => container.querySelector<HTMLButtonElement>(".qc-option-custom")!.click());
     type("Three");
-    click("Submit");
+    click("Accept");
     expectAnswers({ "0": ["One", "Three"] });
   });
 
@@ -278,6 +300,7 @@ describe("AskQuestion production form", () => {
     renderQuestions([{ prompt: "Optional", type: "text" }]);
     type("draft");
     click("Skip");
+    click("Accept");
     expectAnswers({ "0": [] });
   });
 
@@ -286,7 +309,7 @@ describe("AskQuestion production form", () => {
     act(() => container.querySelector<HTMLButtonElement>(".qc-option")!.click());
     act(() => container.querySelector<HTMLButtonElement>(".qc-option-custom")!.click());
     type("One");
-    click("Submit");
+    click("Accept");
     expectAnswers({ "0": ["One"] });
   });
 });
