@@ -9,7 +9,8 @@
 
 import * as vscode from "vscode";
 import { pendingChanges, type ChangeScope, type PendingChange } from "../stores/pendingChanges";
-import { changedLinesSince, computeHunks, mapLineForward } from "../shared/lineDiff";
+import { computeHunks, lineEdits, mapLineForward, revertOnto, withoutHunk } from "../shared/lineDiff";
+import { reviewMarks } from "../shared/reviewMarks";
 import { safePath } from "../context/workspaceUtils";
 import { createHash } from "node:crypto";
 
@@ -105,19 +106,52 @@ async function closeInlineDiff(entry: DiffEntry) {
 }
 
 /**
- * Changed-line highlight for when the file is opened as a normal editor rather
- * than through the inline diff (the diff editor draws its own colours).
+ * Inline diff for when the file is opened as a normal editor rather than
+ * through the diff editor (which draws its own colours). VS Code cannot insert
+ * real lines, so deleted text is drawn as struck-through red annotations.
  */
+const ADDED_LINE = new vscode.ThemeColor("diffEditor.insertedLineBackground");
+const ADDED_TEXT = new vscode.ThemeColor("diffEditor.insertedTextBackground");
+const REMOVED_TEXT = new vscode.ThemeColor("diffEditor.removedTextBackground");
+const REMOVED_FG = new vscode.ThemeColor("gitDecoration.deletedResourceForeground");
 const addedDecoration = vscode.window.createTextEditorDecorationType({
   isWholeLine: true,
-  backgroundColor: new vscode.ThemeColor("diffEditor.insertedLineBackground"),
+  backgroundColor: ADDED_LINE,
   overviewRulerColor: new vscode.ThemeColor("editorOverviewRuler.addedForeground"),
   overviewRulerLane: vscode.OverviewRulerLane.Left,
-  borderColor: new vscode.ThemeColor("diffEditor.insertedTextBorder"),
-  borderWidth: "0 0 0 2px",
+  borderColor: new vscode.ThemeColor("editorGutter.addedBackground"),
+  borderWidth: "0 0 0 3px",
   borderStyle: "solid",
   rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
 });
+const modifiedLineDecoration = vscode.window.createTextEditorDecorationType({
+  isWholeLine: true,
+  overviewRulerColor: new vscode.ThemeColor("editorOverviewRuler.modifiedForeground"),
+  overviewRulerLane: vscode.OverviewRulerLane.Left,
+  borderColor: new vscode.ThemeColor("editorGutter.modifiedBackground"),
+  borderWidth: "0 0 0 3px",
+  borderStyle: "solid",
+  rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+});
+const addedWordsDecoration = vscode.window.createTextEditorDecorationType({ backgroundColor: ADDED_TEXT, rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed });
+const removedTextDecoration = vscode.window.createTextEditorDecorationType({
+  overviewRulerColor: new vscode.ThemeColor("editorOverviewRuler.deletedForeground"),
+  overviewRulerLane: vscode.OverviewRulerLane.Left,
+});
+const reviewDecorations = [addedDecoration, modifiedLineDecoration, addedWordsDecoration, removedTextDecoration];
+
+const MAX_REMOVED_PREVIEW = 160;
+function removedPreview(lines: string[]): string {
+  const text = lines.map(line => line.trim()).join("  ⏎  ");
+  return text.length > MAX_REMOVED_PREVIEW ? `${text.slice(0, MAX_REMOVED_PREVIEW)}…` : text;
+}
+function removedHover(lines: string[]): vscode.MarkdownString {
+  const fence = "`".repeat(Math.max(3, ...lines.map(line => (line.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length + 1), 0))));
+  return new vscode.MarkdownString(`**Removed by the agent**\n\n${fence}diff\n${lines.map(line => `- ${line}`).join("\n")}\n${fence}`);
+}
+function removedAttachment(text: string, spaced: boolean): vscode.ThemableDecorationAttachmentRenderOptions {
+  return { contentText: text, backgroundColor: REMOVED_TEXT, color: REMOVED_FG, textDecoration: "line-through", margin: spaced ? "0 0 0 2em" : undefined };
+}
 
 /** Pending changes by editor path, rebuilt only when the pending set changes. */
 let changesByPath: Map<string, PendingChange> | undefined;
@@ -142,19 +176,40 @@ const decorated = new WeakSet<vscode.TextEditor>();
 function refreshEditor(editor: vscode.TextEditor) {
   const change = changeForEditor(editor);
   if (!change || change.previewOnly) {
-    if (decorated.has(editor)) { editor.setDecorations(addedDecoration, []); decorated.delete(editor); }
+    if (decorated.has(editor)) { for (const type of reviewDecorations) editor.setDecorations(type, []); decorated.delete(editor); }
     return;
   }
   decorated.add(editor);
-  // Track the agent's lines through the live text so the user's own unrelated
-  // edits are never painted as agent changes.
-  const lastLine = Math.max(editor.document.lineCount - 1, 0);
-  const added: vscode.Range[] = [];
-  for (const line of changedLinesSince(change.before, change.after, editor.document.getText())) {
-    if (line > lastLine) break;
-    added.push(new vscode.Range(line, 0, line, editor.document.lineAt(line).text.length));
+  // Marks follow the agent's lines through the live text so the user's own
+  // unrelated edits are never painted as agent changes.
+  const document = editor.document;
+  const marks = reviewMarks(change.before, change.after, document.getText());
+  const lastLine = Math.max(document.lineCount - 1, 0);
+  const lineRange = (line: number) => new vscode.Range(line, 0, line, document.lineAt(line).text.length);
+  const added: vscode.Range[] = [], modified: vscode.Range[] = [], words: vscode.Range[] = [], removed: vscode.DecorationOptions[] = [];
+  for (const line of marks.addedLines) if (line <= lastLine) added.push(lineRange(line));
+  for (const mark of marks.modifiedLines) {
+    if (mark.line > lastLine) continue;
+    modified.push(lineRange(mark.line));
+    for (const [start, end] of mark.added) words.push(new vscode.Range(mark.line, start, mark.line, end));
+    for (const old of mark.removed) {
+      removed.push({ range: new vscode.Range(mark.line, old.column, mark.line, old.column), hoverMessage: removedHover([old.text]), renderOptions: { before: removedAttachment(old.text, false) } });
+    }
+  }
+  for (const removal of marks.removals) {
+    if (removal.line > lastLine) continue;
+    const end = document.lineAt(removal.line).text.length;
+    const below = removal.placement === "below";
+    removed.push({
+      range: new vscode.Range(removal.line, below ? end : 0, removal.line, below ? end : 0),
+      hoverMessage: removedHover(removal.lines),
+      renderOptions: below ? { after: removedAttachment(removedPreview(removal.lines), true) } : { before: removedAttachment(`${removedPreview(removal.lines)}  `, false) },
+    });
   }
   editor.setDecorations(addedDecoration, added);
+  editor.setDecorations(modifiedLineDecoration, modified);
+  editor.setDecorations(addedWordsDecoration, words);
+  editor.setDecorations(removedTextDecoration, removed);
 }
 
 /** Lets editor title actions appear only on files with pending agent edits. */
@@ -217,9 +272,12 @@ const blockLenses: vscode.CodeLensProvider = {
       const line = Math.min(mapLineForward(change.after, text, hunk.startLine), lastLine);
       const range = new vscode.Range(line, 0, line, 0);
       const args = [change.path, index, hunk.startLine];
+      // CodeLens can't be styled, so colour comes from the emoji markers and
+      // the spacer lens keeps the two targets well apart.
       return [
-        new vscode.CodeLens(range, { title: "$(check) Accept", tooltip: "Keep this agent change", command: "ocursor.acceptBlock", arguments: args }),
-        new vscode.CodeLens(range, { title: "$(discard) Reject", tooltip: "Undo this agent change", command: "ocursor.rejectBlock", arguments: args }),
+        new vscode.CodeLens(range, { title: "🟩 $(check) Accept", tooltip: "Keep this agent change", command: "ocursor.acceptBlock", arguments: args }),
+        new vscode.CodeLens(range, { title: "\u2003\u2003\u2003", command: "" }),
+        new vscode.CodeLens(range, { title: "🟥 $(discard) Reject", tooltip: "Undo this agent change", command: "ocursor.rejectBlock", arguments: args }),
       ];
     });
   },
@@ -232,14 +290,39 @@ function blockStillCurrent(path: string, index: number, startLine: number): bool
   return !!current;
 }
 
+/**
+ * Undo one agent block inside an open editor's buffer. Used when the file has
+ * unsaved typing: the edit is a normal undoable change to the buffer, and the
+ * user's other unsaved work is left exactly as it was (still unsaved).
+ */
+async function undoBlockInEditor(document: vscode.TextDocument, change: PendingChange, index: number): Promise<"done" | "conflict" | "failed"> {
+  const hunk = computeHunks(change.before, change.after)[index];
+  if (!hunk) return "failed";
+  const current = document.getText();
+  const eol = current.includes("\r\n") ? "\r\n" : "\n";
+  const normalized = eol === "\r\n" ? current.replace(/\r\n/g, "\n") : current;
+  const merged = revertOnto(withoutHunk(change.after, hunk), change.after, normalized);
+  if (merged === null) return "conflict";
+  const edit = new vscode.WorkspaceEdit();
+  for (const { start, end, text } of lineEdits(normalized, merged)) {
+    const toOffset = (offset: number) => eol === "\r\n" ? offset + (normalized.slice(0, offset).match(/\n/g)?.length ?? 0) : offset;
+    edit.replace(document.uri, new vscode.Range(document.positionAt(toOffset(start)), document.positionAt(toOffset(end))), eol === "\r\n" ? text.replace(/\n/g, "\r\n") : text);
+  }
+  return await vscode.workspace.applyEdit(edit) ? "done" : "failed";
+}
+
 async function reviewBlock(path: string, index: number, startLine: number, reject: boolean) {
   await runReviewAction(async () => {
     if (!blockStillCurrent(path, index, startLine)) return;
-    if (reject) {
-      const uri = fileUriFor(path);
-      if (!uri || !await ensureSaved([uri.fsPath])) return;
-      await pendingChanges.rejectHunk(path, index);
-    } else await pendingChanges.acceptHunk(path, index);
+    if (!reject) return pendingChanges.acceptHunk(path, index);
+    const uri = fileUriFor(path);
+    const document = uri && vscode.workspace.textDocuments.find(doc => doc.uri.scheme === "file" && doc.uri.fsPath === uri.fsPath);
+    if (!document?.isDirty) return pendingChanges.rejectHunk(path, index);
+    const change = pendingChanges.get(path)!;
+    const result = await undoBlockInEditor(document, change, index);
+    if (result === "conflict") throw new Error("Cannot undo this block: its lines were edited after the agent. Your text was preserved.");
+    if (result === "failed") throw new Error("Could not undo this block in the editor. Your text was preserved.");
+    await pendingChanges.rejectHunk(path, index, undefined, { appliedInEditor: true });
   });
 }
 
