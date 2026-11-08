@@ -13,6 +13,12 @@ All notable changes to the "ocursor" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.2.2] - 2026-11-08
+
+### Fixed
+
+- Copying or cutting text from the chat box no longer drops link and file mentions. They paste back as mentions.
+
 ## [0.2.1] - 2026-10-27
 
 ### Added
