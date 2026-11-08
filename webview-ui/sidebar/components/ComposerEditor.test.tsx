@@ -169,6 +169,26 @@ describe("editable Markdown", () => {
     expect(element.querySelector(".mention")).toBeNull();
   });
 
+  it.each(["copy", "cut"])("keeps mentions as attached tags in plain text on %s so they paste back as pills", type => {
+    const link = '<attached type="link" title="www.google.com" content="https://www.google.com/" />';
+    const file = '<attached type="file" title="README.md" content="README.md" />';
+    editor.setText(`Check out ${link} and *literal* ${file}\nnext`);
+    editor.selectAll();
+    const data = new Map<string, string>();
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: { clearData: () => data.clear(), setData: (k: string, v: string) => data.set(k, v) } });
+    element.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    const text = data.get("text/plain")!;
+    expect(text).toBe(`Check out ${link} and literal ${file}\nnext`);
+    if (type === "copy") editor.setText("");
+    expect(editor.isEmpty()).toBe(true);
+    editor.insertText(text, true);
+    expect(element.querySelectorAll(".mention")).toHaveLength(2);
+    expect(editor.getText()).toContain(link);
+    expect(editor.getText()).toContain(file);
+  });
+
   it("imports a browser selection before replacing an @ query with a mention", () => {
     editor.setText("Before @src after");
     const text = element.querySelector("p")!.firstChild!;
