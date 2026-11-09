@@ -293,6 +293,7 @@ export interface FeatureConfig {
   subagentModel: string;
   subagentModelsV2?: boolean;
   autoJudgeModel: string;
+  refineModel?: string;
   teamComposerModel: string;
   teamComposerModels: string[];
   teamSnapshots: TeamSnapshot[];

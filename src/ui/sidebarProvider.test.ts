@@ -922,6 +922,25 @@ describe("host-owned transcripts and model output edits", () => {
     delete (vscode as any).window.activeTextEditor; delete (vscode as any).workspace;
   });
 
+  it("adds Explorer files and folders as mentions, skipping non-file and missing resources", async () => {
+    const { host } = await fixture();
+    host._webviewReady = true;
+    (vscode as any).FileType = { File: 1, Directory: 2 };
+    const types: Record<string, number> = { "/workspace/src": 2, "/workspace/src/a.ts": 1 };
+    (vscode as any).workspace = {
+      asRelativePath: (uri: any) => uri.fsPath.replace("/workspace/", ""),
+      fs: { stat: async (uri: any) => { if (!(uri.fsPath in types)) throw new Error("ENOENT"); return { type: types[uri.fsPath] }; } },
+    };
+    vi.mocked(vscode.commands.executeCommand).mockResolvedValue(undefined);
+    const uri = (fsPath: string, scheme = "file") => ({ scheme, fsPath });
+    await host.addResourcesToChat([uri("/workspace/src"), uri("/workspace/src/a.ts"), uri("/workspace/gone"), uri("/x", "untitled")]);
+    expect(vi.mocked(host._view.webview.postMessage).mock.calls.map((c: any[]) => c[0].mention)).toEqual([
+      { kind: "folder", path: "src", name: "src" },
+      { kind: "file", path: "src/a.ts", name: "a.ts" },
+    ]);
+    delete (vscode as any).workspace; delete (vscode as any).FileType;
+  });
+
   it("wakes an in-place quota wait immediately when resumeQuotaWait is received", async () => {
     const { host, a } = await fixture();
     const s = session();

@@ -884,6 +884,135 @@ function ModelPicker({
   );
 }
 
+/**
+ * Refine button plus a compact model chip. The chip shows only an icon; its
+ * popover names the current refine model and lists every model to switch to.
+ */
+function RefineControl({
+  modelList,
+  refineModel,
+  chatModel,
+  onRefineModel,
+  busy,
+  disabled,
+  onRefine,
+  onCancel,
+}: {
+  modelList: ModelDef[];
+  refineModel: string;
+  chatModel: string;
+  onRefineModel: (model: string) => void;
+  busy: boolean;
+  disabled: boolean;
+  onRefine: () => void;
+  onCancel: () => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const { present, exiting } = usePresence(open);
+  const [query, setQuery] = React.useState("");
+  useOutsideClose(open, () => setOpen(false));
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const pickerRef = React.useRef<HTMLDivElement>(null);
+  const searchRef = React.useRef<HTMLInputElement>(null);
+  const { style, maxH, side } = useAnchoredMenu(open, triggerRef, pickerRef, [modelList.length]);
+  React.useEffect(() => { if (!present) setQuery(""); }, [present]);
+  React.useLayoutEffect(() => { if (open) searchRef.current?.focus({ preventScroll: true }); }, [open]);
+
+  const nameOf = (id: string) => modelList.find((m) => m.id === id)?.name || id;
+  const effective = refineModel || chatModel;
+  const currentLabel = refineModel ? nameOf(refineModel) : `Chat model${chatModel ? ` (${nameOf(chatModel)})` : ""}`;
+  const q = query.trim().toLowerCase();
+  const filtered = q ? modelList.filter((m) => m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q)) : modelList;
+  const groups = React.useMemo(() => {
+    const map = new Map<string, ModelDef[]>();
+    for (const m of filtered) {
+      const key = m.kind === "llamacpp" ? "Local · llama.cpp" : m.kind === "ollama" ? "Local · Ollama" : m.providerName || "Other";
+      (map.get(key) ?? map.set(key, []).get(key)!).push(m);
+    }
+    return [...map.entries()];
+  }, [filtered]);
+  const pick = (id: string) => {
+    if (!open) return;
+    onRefineModel(id);
+    setOpen(false);
+    triggerRef.current?.focus({ preventScroll: true });
+  };
+
+  return (
+    <span className="refine-control">
+      <button
+        type="button"
+        className={"attach-btn refine-btn" + (busy ? " busy" : "")}
+        title={busy ? "Refining… click to cancel" : `Refine prompt with ${nameOf(effective) || "the chat model"}`}
+        aria-label={busy ? "Cancel refine" : "Refine prompt"}
+        disabled={!busy && disabled}
+        onClick={(e) => { e.stopPropagation(); if (busy) onCancel(); else onRefine(); }}
+      >
+        <Icon name={busy ? "stop" : "edit"} size={busy ? 12 : 15} />
+      </button>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={"refine-model-chip" + (refineModel ? " set" : "")}
+        title={`Refine model: ${currentLabel}`}
+        aria-label={`Refine model: ${currentLabel}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        onKeyDown={(e) => { if (e.key === "Escape" && open) { e.preventDefault(); e.stopPropagation(); setOpen(false); } }}
+      >
+        <Icon name="model" size={12} />
+        <Icon name="chevD" className="cd" size={10} />
+      </button>
+      {present && createPortal(
+        <div ref={pickerRef} className="model-picker refine-picker" role="dialog" aria-label="Refine model"
+          data-state={exiting ? "closing" : "open"} data-side={side} inert={exiting || undefined} aria-hidden={exiting || undefined}
+          style={{ ...style, "--mp-max-h": `${maxH}px`, pointerEvents: exiting ? "none" : undefined } as React.CSSProperties}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault(); event.stopPropagation(); setOpen(false); triggerRef.current?.focus({ preventScroll: true });
+          }}>
+          <div className="model-picker-view">
+            <div className="refine-current">
+              <span className="refine-current-label">Refine with</span>
+              <span className="refine-current-name" title={effective}>{currentLabel}</span>
+            </div>
+            <div className="mp-search">
+              <Icon name="search" className="mp-search-icon" />
+              <input ref={searchRef} value={query} placeholder="Search models" aria-label="Search refine models" onChange={(e) => setQuery(e.target.value)} />
+            </div>
+            <div className="mp-body">
+              {!q && (
+                <div className={"model-item" + (!refineModel ? " active" : "")} role="button" tabIndex={0} aria-pressed={!refineModel}
+                  onKeyDown={(event) => activateFromKeyboard(event, () => pick(""))} onClick={() => pick("")}>
+                  <span className="model-item-name">Use chat model</span>
+                  {!refineModel && <Icon name="check" className="model-item-check" />}
+                </div>
+              )}
+              {filtered.length === 0 && <div className="model-item dim">No matches</div>}
+              {groups.map(([group, list]) => (
+                <React.Fragment key={group}>
+                  <div className="mp-group-label">{group}</div>
+                  {list.map((m) => (
+                    <div key={m.id} className={"model-item" + (m.id === refineModel ? " active" : "")} role="button" tabIndex={0}
+                      aria-label={`Refine with ${m.name}`} aria-pressed={m.id === refineModel}
+                      onKeyDown={(event) => activateFromKeyboard(event, () => pick(m.id))} onClick={() => pick(m.id)}>
+                      <span className="model-item-name">{m.name}</span>
+                      {m.id === refineModel && <Icon name="check" className="model-item-check" />}
+                    </div>
+                  ))}
+                </React.Fragment>
+              ))}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </span>
+  );
+}
+
 export type ComposerDraft = { text: string; attachments: Attachment[] };
 
 export function Composer({
@@ -895,6 +1024,8 @@ export function Composer({
   onSelectModel,
   onSaveModelOptions,
   onResetModelOptions,
+  refineModel = "",
+  onRefineModel,
   isRunning,
   isFirst,
   focusKey,
@@ -933,6 +1064,9 @@ export function Composer({
   onSelectModel: (m: string) => void;
   onSaveModelOptions: (modelId: string, options: ModelOption[]) => void;
   onResetModelOptions: (modelId: string) => void;
+  /** Model the Refine button uses ("" = the chat's selected model). */
+  refineModel?: string;
+  onRefineModel?: (model: string) => void;
   isRunning: boolean;
   isFirst?: boolean;
   focusKey?: string;
@@ -1000,6 +1134,38 @@ export function Composer({
   const pastePendingRef = React.useRef<{ id: number; text: string } | null>(null);
   // Set after detectMention is defined (insert fns are declared before it).
   const detectMentionRef = React.useRef<(() => void) | null>(null);
+
+  // Prompt refinement: one request at a time; replies for stale requests are ignored.
+  const [refining, setRefining] = React.useState(false);
+  const [refineError, setRefineError] = React.useState("");
+  const refineRequest = React.useRef("");
+  React.useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const msg = event.data;
+      if (msg?.type !== "promptRefined" || msg.requestId !== refineRequest.current) return;
+      refineRequest.current = "";
+      setRefining(false);
+      if (msg.text) { richEditor.current?.replaceAll(msg.text); setRefineError(""); }
+      else if (msg.error && msg.error !== "cancelled") setRefineError(msg.error);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+  React.useEffect(() => { setRefineError(""); }, [focusKey]);
+  const refinePrompt = () => {
+    const text = richEditor.current?.getText() ?? "";
+    if (!text.trim() || refining) return;
+    const requestId = `refine-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    refineRequest.current = requestId;
+    setRefineError("");
+    setRefining(true);
+    post({ type: "refinePrompt", requestId, text, fallbackModel: selectedModel });
+  };
+  const cancelRefine = () => {
+    refineRequest.current = "";
+    setRefining(false);
+    post({ type: "cancelRefine" });
+  };
 
   const undoEdit = () => richEditor.current?.undo();
   const redoEdit = () => richEditor.current?.redo();
@@ -1217,9 +1383,11 @@ export function Composer({
     refreshEmpty();
   };
 
-  // Make the whole webview a valid drop target. VS Code only routes drag events
-  // INTO a webview while the user holds Shift (otherwise the editor's own drop
-  // overlay captures pointer events and opens the file in an editor group).
+  // Make the whole webview a valid drop target. Drags from the OS file manager
+  // arrive here; drags from VS Code's own Explorer do not (VS Code disables the
+  // webview's pointer events during internal drags, and the Shift-key escape
+  // hatch regressed in 1.140 — microsoft/vscode#339278). The Explorer
+  // "Add to OpenCursor Chat" context-menu command covers that case.
   React.useEffect(() => {
     const handleDrop = (e: DragEvent) => {
       e.preventDefault();
@@ -1239,9 +1407,13 @@ export function Composer({
       ].filter(Boolean);
       const paths = parseDroppedPaths(raws);
       if (paths.length) {
+        const folderNames = new Set(Array.from(dt.items ?? [])
+          .map((item) => item.webkitGetAsEntry?.())
+          .filter((entry) => entry?.isDirectory)
+          .map((entry) => entry!.name));
         for (const p of paths) {
-          const name = p.split(/[\\/]/).pop() || p;
-          insertMention({ path: p, name, kind: "file" });
+          const name = p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
+          insertMention({ path: p, name, kind: folderNames.has(name) ? "folder" : "file" });
         }
       } else if (!dt.files.length) {
         const plain = dt.getData("text/plain");
@@ -1438,7 +1610,7 @@ export function Composer({
       >
         {dragOver && (
           <div className="drop-hint">
-            <Icon name="at" size={13} /> Drop to mention &nbsp;·&nbsp; hold <kbd>Shift</kbd> if it opens the file instead
+            <Icon name="at" size={13} /> Drop to mention
           </div>
         )}
         {attachments.length > 0 && (
@@ -1732,6 +1904,18 @@ export function Composer({
             input.click();
           }} />
           {!editing && <ApprovalPicker policy={approvalPolicy} />}
+          {onRefineModel && (
+            <RefineControl
+              modelList={modelList}
+              refineModel={refineModel}
+              chatModel={selectedModel}
+              onRefineModel={onRefineModel}
+              busy={refining}
+              disabled={empty}
+              onRefine={refinePrompt}
+              onCancel={cancelRefine}
+            />
+          )}
           </div>
           <div className="right">
             {!editing && (() => {
@@ -1772,6 +1956,12 @@ export function Composer({
           </div>
         </div>
       </div>
+      {refineError && (
+        <div className="refine-error" role="alert">
+          <span>Refine failed: {refineError}</span>
+          <button type="button" className="refine-error-close" aria-label="Dismiss" onClick={() => setRefineError("")}><Icon name="close" size={12} /></button>
+        </div>
+      )}
       <div className="composer-footer">
         <div className="composer-footer-options">
           <ModePicker mode={mode} onMode={onMode} />

@@ -180,6 +180,11 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('ocursor.composeTeam', (planner: string, models: string[], signal?: AbortSignal) => sidebarProvider.composeTeam(planner, models ?? [], signal)),
     vscode.commands.registerCommand('ocursor.addToChat', () => sidebarProvider.addSelectionToChat()),
+    // Context menus pass (clicked, allSelected); editor tabs only pass the clicked uri.
+    vscode.commands.registerCommand('ocursor.addResourceToChat', (uri?: vscode.Uri, uris?: vscode.Uri[]) => {
+      const targets = uris?.length ? uris : uri ? [uri] : vscode.window.activeTextEditor ? [vscode.window.activeTextEditor.document.uri] : [];
+      return sidebarProvider.addResourcesToChat(targets);
+    }),
     vscode.commands.registerCommand('ocursor.newChat', () => sidebarProvider.newChat()),
     vscode.commands.registerCommand('ocursor.reviewChanges', () => sidebarProvider.startReview()),
     vscode.commands.registerCommand('ocursor.implementTodo', (uri?: vscode.Uri, line?: number) => sidebarProvider.implementTodo(uri, line)),

@@ -58,6 +58,11 @@
 				"title": "OpenCursor: Add Selection to Chat"
 			},
 			{
+				"command": "ocursor.addResourceToChat",
+				"title": "Add to OpenCursor Chat",
+				"category": "OpenCursor"
+			},
+			{
 				"command": "ocursor.newChat",
 				"title": "OpenCursor: New Chat"
 			},
@@ -103,6 +108,10 @@
 					"when": "false"
 				},
 				{
+					"command": "ocursor.addResourceToChat",
+					"when": "editorIsOpen && resourceScheme == file"
+				},
+				{
 					"command": "ocursor.acceptFileChanges",
 					"when": "resourcePath in ocursor.agentChangedFiles"
 				},
@@ -113,6 +122,20 @@
 				{
 					"command": "ocursor.rejectAllChanges",
 					"when": "ocursor.agentChangedFiles"
+				}
+			],
+			"explorer/context": [
+				{
+					"command": "ocursor.addResourceToChat",
+					"when": "resourceScheme == file",
+					"group": "ocursor@1"
+				}
+			],
+			"editor/title/context": [
+				{
+					"command": "ocursor.addResourceToChat",
+					"when": "resourceScheme == file",
+					"group": "ocursor@1"
 				}
 			],
 			"editor/title": [

@@ -680,3 +680,51 @@ it('restores different drafts and clears a missing draft while staying on the sa
   act(() => root.render(<Composer {...props} focusKey="same" tabDraft={null} />));
   expect(editor().classList.contains('empty')).toBe(true);
 });
+
+it("refines the draft with the chosen model, keeps mentions, and supports undo", () => {
+  const models: ModelDef[] = [
+    { id: "p::fast", name: "Fast Model", kind: "openai", options: [], providerName: "Provider" },
+    { id: "p::smart", name: "Smart Model", kind: "openai", options: [], providerName: "Provider" },
+  ];
+  const chooseModel = vi.fn();
+  act(() => root.render(<Composer {...props} modelList={models} selectedModel="p::fast" refineModel="" onRefineModel={chooseModel} initialText={mention} />));
+  const chip = container.querySelector<HTMLButtonElement>(".refine-model-chip")!;
+  expect(chip.textContent).toBe("");
+  expect(chip.getAttribute("aria-label")).toBe("Refine model: Chat model (Fast Model)");
+  act(() => chip.click());
+  const picker = document.querySelector('[role="dialog"][aria-label="Refine model"]')!;
+  expect(picker.querySelector(".refine-current-name")?.textContent).toBe("Chat model (Fast Model)");
+  act(() => picker.querySelector<HTMLElement>('[aria-label="Refine with Smart Model"]')!.click());
+  expect(chooseModel).toHaveBeenCalledWith("p::smart");
+  expect(document.querySelector('[aria-label="Refine model"][role="dialog"]')).toBeNull();
+
+  const refine = container.querySelector<HTMLButtonElement>('[aria-label="Refine prompt"]')!;
+  act(() => refine.click());
+  const request = vi.mocked(vscode.postMessage).mock.calls.map(([message]) => message as any).find((message) => message.type === "refinePrompt");
+  expect(request).toMatchObject({ text: mention, fallbackModel: "p::fast" });
+  expect(container.querySelector('[aria-label="Cancel refine"]')).not.toBeNull();
+
+  const refined = 'Please update <attached type="file" title="file.ts" content="src/file.ts" /> to fix the bug.';
+  act(() => window.dispatchEvent(new MessageEvent("message", { data: { type: "promptRefined", requestId: "stale", text: "ignored" } })));
+  expect(editor().textContent).toContain("Before");
+  act(() => window.dispatchEvent(new MessageEvent("message", { data: { type: "promptRefined", requestId: request.requestId, text: refined } })));
+  expect(editor().textContent).toContain("to fix the bug.");
+  expect(editor().querySelector(".mention")).not.toBeNull();
+  expect(container.querySelector('[aria-label="Refine prompt"]')).not.toBeNull();
+  expect(lastDraft().text).toBe(refined);
+});
+
+it("shows refine errors, disables refine on an empty draft, and cancels in flight", () => {
+  act(() => root.render(<Composer {...props} onRefineModel={vi.fn()} />));
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="Refine prompt"]')!.disabled).toBe(true);
+  act(() => root.render(null));
+  act(() => root.render(<Composer {...props} onRefineModel={vi.fn()} initialText="make it faster" />));
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Refine prompt"]')!.click());
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Cancel refine"]')!.click());
+  expect(vi.mocked(vscode.postMessage)).toHaveBeenCalledWith({ type: "cancelRefine" });
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Refine prompt"]')!.click());
+  const request = vi.mocked(vscode.postMessage).mock.calls.map(([message]) => message as any).filter((message) => message.type === "refinePrompt").pop();
+  act(() => window.dispatchEvent(new MessageEvent("message", { data: { type: "promptRefined", requestId: request.requestId, error: "No provider." } })));
+  expect(container.querySelector('.refine-error')?.textContent).toContain("Refine failed: No provider.");
+  expect(editor().textContent).toBe("make it faster");
+});

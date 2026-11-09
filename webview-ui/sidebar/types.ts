@@ -113,14 +113,15 @@ export type UiPrefs = { chatTextSize: string; motion?: "full" | "system" | "redu
 /** A subagent team as shown in the composer's Project-mode picker. */
 export type TeamInfo = { id: string; name: string; description: string; members: string[] };
 export type InMessage =
-  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; runningConvIds?: string[]; pausedConvIds?: [string, "pending" | "paused"][]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy; allowModelOutputEdits?: boolean }
+  | { type: "initialState"; mode: Mode; selectedModel: string; activeId?: string; turns: Turn[]; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; refineModel?: string; runningConvIds?: string[]; pausedConvIds?: [string, "pending" | "paused"][]; uiPrefs?: UiPrefs; usedTokens?: number; workspaceState?: ChatWorkspaceState; workspaceRoot?: string; approvalPolicy?: ApprovalPolicy; allowModelOutputEdits?: boolean }
   | { type: "workflowState"; queues: Record<string, QueuedMessage[]>; steeringQueues?: Record<string, QueuedMessage[]>; goals: Record<string, ConversationGoal> }
   | { type: "queueSteeringResult"; convId: string; requestId: string; accepted: boolean }
   | { type: "requestAccepted"; requestId: string; convId: string; created: boolean }
   | { type: "steeringAccepted"; convId: string }
   | { type: "queueDraft"; convId: string; draft: { text: string; attachments: Attachment[] } }
   | { type: "conversationSearchResults"; requestId: number; list: ConversationSummary[] }
-  | { type: "configState"; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; uiPrefs?: UiPrefs; approvalPolicy?: ApprovalPolicy }
+  | { type: "configState"; personas: PersonaInfo[]; activePersonaId: string; hasProviders: boolean; teams?: TeamInfo[]; activeTeamIds?: string[]; refineModel?: string; uiPrefs?: UiPrefs; approvalPolicy?: ApprovalPolicy }
+  | { type: "promptRefined"; requestId: string; text?: string; error?: string }
   | { type: "modelsFetched"; models: string[]; modelList?: ModelDef[] }
   | { type: "modelSelected"; model: string }
   | { type: "runPause"; convId: string; state: "off" | "pending" | "paused" }
@@ -198,6 +199,9 @@ export type OutMessage =
   | { type: "resolveApproval"; requestId: string; approve?: boolean; pattern?: string; addPattern?: "allow" | "deny"; setMode?: ApprovalMode }
   | { type: "setMode"; mode: Mode; convId?: string }
   | { type: "setActiveTeams"; teamIds: string[] }
+  | { type: "setRefineModel"; model: string }
+  | { type: "refinePrompt"; requestId: string; text: string; fallbackModel?: string }
+  | { type: "cancelRefine" }
   | { type: "fetchModels" }
   | { type: "selectModel"; model: string; convId?: string }
   | { type: "saveModelOptions"; modelId: string; options: ModelOption[] }

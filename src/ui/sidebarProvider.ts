@@ -15,6 +15,7 @@ import { getThinkingLevels } from "../agent/oauth/protocols/providers/thinkingLe
 import { AgentEvent, Mode, Attachment } from "../agent/types";
 import { listModels, generateTitle, pickModel, completeText } from "../agent/provider";
 import { buildComposerPrompt, matchSelectedModels, parseComposition, type Composition } from "../agent/teamComposer";
+import { cleanRefinedText, protectMentions, REFINE_SYSTEM_PROMPT, restoreMentions } from "../agent/promptRefiner";
 import { providerApiKeyPool, type ApiKeyPool } from "../agent/provider/apiKeyPool";
 import { OAUTH_KINDS, isOAuthProviderKind } from "../shared/oauthProviders";
 import { PROVIDER_PRESETS } from "../shared/providerCatalog";
@@ -504,9 +505,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           name: `${rel.split("/").pop()}:${sel.start.line + 1}-${sel.end.line + 1}`,
           detail: rel,
         };
+    this._insertMentions([mention]);
+  }
+
+  /**
+   * Explorer / editor-tab context menu: mention files and folders in the composer.
+   * Stands in for drag-and-drop, which VS Code doesn't deliver from the Explorer into webviews.
+   */
+  public async addResourcesToChat(uris: vscode.Uri[]) {
+    const mentions: HostMentionItem[] = [];
+    for (const uri of uris) {
+      if (uri.scheme !== "file") continue;
+      let isDir = false;
+      try {
+        isDir = ((await vscode.workspace.fs.stat(uri)).type & vscode.FileType.Directory) !== 0;
+      } catch { continue; }
+      const rel = vscode.workspace.asRelativePath(uri, false);
+      mentions.push({ kind: isDir ? "folder" : "file", path: rel, name: rel.split(/[\\/]/).pop() || rel });
+    }
+    if (mentions.length) this._insertMentions(mentions);
+  }
+
+  private _insertMentions(mentions: HostMentionItem[]) {
     // A freshly created webview cannot receive messages until it reports ready.
-    if (this._view && this._webviewReady) void this._view.webview.postMessage({ type: "insertMention", mention });
-    else this._pendingMentions.push(mention);
+    for (const mention of mentions) {
+      if (this._view && this._webviewReady) void this._view.webview.postMessage({ type: "insertMention", mention });
+      else this._pendingMentions.push(mention);
+    }
     void vscode.commands.executeCommand("ocursor.chatView.focus");
   }
 
@@ -815,6 +840,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         case "setActiveTeams":
           await this.featureStore.set({ activeTeamIds: data.teamIds });
+          break;
+        case "setRefineModel":
+          await this.featureStore.set({ refineModel: String(data.model ?? "") });
+          break;
+        case "refinePrompt":
+          void this._refinePrompt(String(data.requestId ?? ""), String(data.text ?? ""), String(data.fallbackModel ?? ""));
+          break;
+        case "cancelRefine":
+          this._refineAbort?.abort();
           break;
         case "fetchModels":
           await this._handleFetchModels();
@@ -1193,6 +1227,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       hasProviders: this._enabledProviders().length > 0 || OAUTH_KINDS.some(kind => oauth.isConnected(kind)),
       teams: this._teamSummaries(features),
       activeTeamIds: features.activeTeamIds ?? [],
+      refineModel: features.refineModel ?? "",
       runningConvIds: [...this._sessions.keys()],
       pausedConvIds: [...this._sessions].filter(([, s]) => s.pause).map(([id, s]) => [id, s.pause]),
       workspaceState: this._store.getWorkspaceState(),
@@ -1392,6 +1427,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       hasProviders: this._enabledProviders().length > 0 || OAUTH_KINDS.some(kind => oauth.isConnected(kind)),
       teams: this._teamSummaries(features),
       activeTeamIds: features.activeTeamIds ?? [],
+      refineModel: features.refineModel ?? "",
       uiPrefs: {
         chatTextSize: features.chatTextSize ?? "default",
         motion: features.motion ?? "full",
@@ -1998,6 +2034,43 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       : [];
     const allScoped = list.map((m) => m.id);
     return [...new Set([...sameProviderBare, ...allScoped])];
+  }
+
+  private _refineAbort?: AbortController;
+
+  /**
+   * Rewrite the composer draft with the refine model (or the chat's model).
+   * Mention pills are swapped for placeholders so the model can't break them.
+   * The reply goes back to the webview, which replaces the draft undoably.
+   */
+  private async _refinePrompt(requestId: string, text: string, fallbackModel: string): Promise<void> {
+    const reply = (result: { text?: string; error?: string }) =>
+      this._view?.webview.postMessage({ type: "promptRefined", requestId, ...result });
+    this._refineAbort?.abort();
+    const abort = new AbortController();
+    this._refineAbort = abort;
+    try {
+      if (!text.trim()) throw new Error("Type a prompt to refine first.");
+      const model = this.featureStore.get().refineModel || fallbackModel || this.settingsManager.getSettings().model;
+      if (!model || model === "auto") throw new Error("Choose a model for Refine first.");
+      const prov = await this._resolveProviderForModel(model);
+      if (!prov.oauthKind && !prov.baseUrl) throw new Error(`The refine model "${model}" has no reachable provider.`);
+      const { text: protectedText, tags } = protectMentions(text);
+      const out = await completeText({
+        apiBaseUrl: prov.baseUrl, apiKey: prov.apiKey, apiKeyPool: prov.apiKeyPool, anthropic: prov.anthropic, oauthKind: prov.oauthKind,
+        model: prov.model, system: REFINE_SYSTEM_PROMPT, user: protectedText, signal: abort.signal, timeoutMs: 90_000, maxTokens: 8_000,
+        onUsage: (event) => {
+          if (this.featureStore.get().trackUsage !== false) void recordUsage(event.model ?? prov.model, event.promptTokens ?? 0, event.completionTokens ?? 0, event);
+        },
+      });
+      const refined = cleanRefinedText(out);
+      if (!refined) throw new Error("The model returned an empty prompt.");
+      reply({ text: restoreMentions(refined, tags) });
+    } catch (e: any) {
+      reply({ error: abort.signal.aborted ? "cancelled" : e?.message || String(e) });
+    } finally {
+      if (this._refineAbort === abort) this._refineAbort = undefined;
+    }
   }
 
   /**

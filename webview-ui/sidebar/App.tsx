@@ -1200,6 +1200,7 @@ export function App() {
   const [hasProviders, setHasProviders] = React.useState(true);
   const [teams, setTeams] = React.useState<TeamInfo[]>([]);
   const [activeTeamIds, setActiveTeamIds] = React.useState<string[]>([]);
+  const [refineModel, setRefineModel] = React.useState("");
   const [uiPrefs, setUiPrefs] = React.useState<{ chatTextSize: string; submitWithCtrlEnter: boolean; maxTabCount: number; completionSound: boolean; perTabDrafts: boolean; motion?: MotionPreference }>({ chatTextSize: "default", submitWithCtrlEnter: false, maxTabCount: 0, completionSound: false, perTabDrafts: true, motion: "full" });
   React.useEffect(() => { setMotionPreference(uiPrefs.motion); }, [uiPrefs.motion]);
   const uiPrefsRef = React.useRef(uiPrefs);
@@ -1609,6 +1610,7 @@ export function App() {
           setHasProviders(!!msg.hasProviders);
           if (msg.teams) setTeams(msg.teams);
           if (msg.activeTeamIds) setActiveTeamIds(msg.activeTeamIds);
+          if (msg.refineModel !== undefined) setRefineModel(msg.refineModel);
           const nextPerTabDrafts = msg.uiPrefs ? msg.uiPrefs.perTabDrafts !== false : true;
           if (msg.uiPrefs) setUiPrefs({ ...msg.uiPrefs, perTabDrafts: nextPerTabDrafts });
           if (msg.workspaceState) {
@@ -1706,6 +1708,7 @@ export function App() {
           setHasProviders(!!msg.hasProviders);
           if (msg.teams) setTeams(msg.teams);
           if (msg.activeTeamIds) setActiveTeamIds(msg.activeTeamIds);
+          if (msg.refineModel !== undefined) setRefineModel(msg.refineModel);
           if (msg.uiPrefs) setUiPrefs({ ...msg.uiPrefs, perTabDrafts: msg.uiPrefs.perTabDrafts !== false });
           // Only follow the global default persona for brand-new (empty) chats.
           if (sessionFor(activeIdRef.current).turns.length === 0) setPersonaId(msg.activePersonaId || "default");
@@ -2128,6 +2131,10 @@ export function App() {
     setActiveTeamIds(ids);
     post({ type: "setActiveTeams", teamIds: ids });
   });
+  const composerOnRefineModel = useStableCallback((model: string) => {
+    setRefineModel(model);
+    post({ type: "setRefineModel", model });
+  });
   const composerOnSelectModel = useStableCallback((m: string) => selectTabModel(m));
   const composerOnSaveModelOptions = useStableCallback((modelId: string, options: ModelOption[]) => {
     setModelList((prev) => prev.map((m) => (m.id === modelId ? { ...m, options } : m)));
@@ -2477,6 +2484,8 @@ export function App() {
           onSelectModel={composerOnSelectModel}
           onSaveModelOptions={composerOnSaveModelOptions}
           onResetModelOptions={composerOnResetModelOptions}
+          refineModel={refineModel}
+          onRefineModel={composerOnRefineModel}
           isRunning={isRunning}
           isFirst={turns.length === 0}
           usedTokens={active.usedTokens}

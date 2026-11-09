@@ -509,6 +509,16 @@ export class ComposerEditor {
     this.scheduleHighlight();
   }
 
+  /** Replace the whole document as one undoable step (unlike setText, which resets history). */
+  replaceAll(markdown: string): void {
+    this.flush();
+    const doc = parser.parse(markdown);
+    const transaction = closeHistory(this.view.state.tr).replaceWith(0, this.view.state.doc.content.size, doc.content);
+    transaction.setSelection(TextSelection.atEnd(transaction.doc));
+    this.view.dispatch(transaction);
+    this.view.focus();
+  }
+
   getText(): string {
     this.flush();
     const doc = this.view.state.doc;

@@ -320,6 +320,8 @@ export interface FeatureConfig {
 	subagentModelsV2?: boolean;
 	/** Judge model used by Auto mode to pick a model for each task ("" = first enabled). */
 	autoJudgeModel: string;
+	/** Model used by the chat composer's Refine button ("" = the chat's selected model). */
+	refineModel: string;
 	/** Planner model that composes subagent models and teams ("" = none chosen). */
 	teamComposerModel: string;
 	/** Models the composer may assign to subagents ([] = every enabled model). */
@@ -401,6 +403,7 @@ const DEFAULTS: FeatureConfig = {
 	subagentModel: "__oauth__:antigravity::gemini-3.8-flash-high",
 	subagentModelsV2: true,
 	autoJudgeModel: "",
+	refineModel: "",
 	teamComposerModel: "",
 	teamComposerModels: [],
 	teamSnapshots: [],
