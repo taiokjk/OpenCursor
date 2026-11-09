@@ -13,7 +13,8 @@ import { runAgent } from "../agent/loop";
 import type { CompactionDecision } from "../agent/loopTypes";
 import { getThinkingLevels } from "../agent/oauth/protocols/providers/thinkingLevels.js";
 import { AgentEvent, Mode, Attachment } from "../agent/types";
-import { listModels, generateTitle, pickModel } from "../agent/provider";
+import { listModels, generateTitle, pickModel, completeText } from "../agent/provider";
+import { buildComposerPrompt, parseComposition, type Composition } from "../agent/teamComposer";
 import { providerApiKeyPool, type ApiKeyPool } from "../agent/provider/apiKeyPool";
 import { OAUTH_KINDS, isOAuthProviderKind } from "../shared/oauthProviders";
 import { PROVIDER_PRESETS } from "../shared/providerCatalog";
@@ -1997,6 +1998,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       : [];
     const allScoped = list.map((m) => m.id);
     return [...new Set([...sameProviderBare, ...allScoped])];
+  }
+
+  /**
+   * Ask the planner model to assign the selected models to every subagent and
+   * propose squads. Returns a validated composition; the caller applies it.
+   */
+  public async composeTeam(planner: string, selected: string[], signal?: AbortSignal): Promise<Composition> {
+    const available = this._buildModelList(this._fetchedCache ?? []).filter((m) => m.id !== "auto");
+    const pool = selected.length ? available.filter((m) => selected.includes(m.id)) : available;
+    if (!pool.length) throw new Error("None of the selected models are currently enabled.");
+    if (!planner) throw new Error("Choose a planner model first.");
+    const prov = await this._resolveProviderForModel(planner);
+    if (!prov.oauthKind && !prov.baseUrl) throw new Error(`The planner model "${planner}" has no reachable provider.`);
+    const features = this.featureStore.get();
+    const { system, user } = buildComposerPrompt(features, pool.map((m) => ({ id: m.id, name: m.name, providerName: m.providerName })));
+    const text = await completeText({
+      apiBaseUrl: prov.baseUrl, apiKey: prov.apiKey, apiKeyPool: prov.apiKeyPool, anthropic: prov.anthropic, oauthKind: prov.oauthKind,
+      model: prov.model, system, user, signal,
+      onUsage: (event) => {
+        if (this.featureStore.get().trackUsage !== false) void recordUsage(event.model ?? prov.model, event.promptTokens ?? 0, event.completionTokens ?? 0, event);
+      },
+    });
+    return parseComposition(text, features.subagents, pool.map((m) => m.id));
   }
 
   /** Auto mode: ask the judge model to choose an enabled model for the task. */

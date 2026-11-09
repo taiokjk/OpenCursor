@@ -578,6 +578,23 @@ export async function pickModel(apiBaseUrl: string, apiKey: string, judge: strin
   return cleanModelSelection(String(d?.choices?.[0]?.message?.content ?? ""));
 }
 
+/**
+ * One-shot completion for internal planning tasks that need a full answer
+ * (not a title or a single id), so it gets a long deadline and token budget.
+ * Reasoning blocks are stripped from the returned text.
+ */
+export async function completeText(opts: Omit<StreamChatOpts, "signal" | "messages" | "maxTokens"> & { system: string; user: string; signal?: AbortSignal; timeoutMs?: number; maxTokens?: number; onUsage?: AuxiliaryRequestOptions["onUsage"] }): Promise<string> {
+  const deadline = AbortSignal.timeout(opts.timeoutMs ?? 180_000);
+  const signal = opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline;
+  const { system, user, onUsage, timeoutMs: _timeout, ...rest } = opts;
+  let text = "";
+  for await (const ev of streamChat({ ...rest, messages: [{ role: "system", content: system }, { role: "user", content: user }], maxTokens: opts.maxTokens ?? 16_000, maxRetries: opts.maxRetries ?? 2, signal })) {
+    if (ev.type === "text-delta") text += ev.text;
+    if (ev.type === "usage") onUsage?.(ev);
+  }
+  return text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "").trim();
+}
+
 /** Native MiniMax chat keeps reasoning in content. Route from the actual final
  * answer, using the same cleanup for streaming and non-streaming judges. */
 function cleanModelSelection(text: string): string {

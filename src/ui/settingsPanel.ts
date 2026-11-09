@@ -25,6 +25,8 @@ import { createDocPolicy } from "../agent/docsDiscovery";
 import { docIndexSettingsChanged, normalizeDocSourceSettings } from "../shared/docSourceSettings";
 import { findWorkspaceRoot } from "../context/workspaceUtils";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
+import { addSnapshot, applyComposition, restoreSnapshot, sameSetup, takeSnapshot, type Composition } from "../agent/teamComposer";
 import * as llama from "../agent/llamacpp";
 import type { LlamacppModel } from "../agent/llamacpp";
 import * as ollama from "../agent/ollama";
@@ -305,6 +307,23 @@ export class SettingsPanel {
             await mcpManager.sync(this.featureStore.get().mcpServers);
             await this._sendFeatures();
             break;
+          case "composeTeam":
+            await this._composeTeam(String(message.planner || ""), Array.isArray(message.models) ? message.models.map(String) : [], message.saveHistory !== false);
+            break;
+          case "saveTeamSnapshot":
+            await this._saveTeamSnapshot(String(message.label || "Manual snapshot"));
+            await this._sendFeatures();
+            break;
+          case "restoreTeamSnapshot":
+            await this._restoreTeamSnapshot(String(message.id || ""));
+            await this._sendFeatures();
+            break;
+          case "deleteTeamSnapshot": {
+            const f = this.featureStore.get();
+            await this.featureStore.set({ teamSnapshots: (f.teamSnapshots ?? []).filter((s) => s.id !== message.id) });
+            await this._sendFeatures();
+            break;
+          }
           case "getExternalHooks":
             try {
               this._panel.webview.postMessage({ type: "externalHooks", hooks: listExternalHooks() });
@@ -879,6 +898,48 @@ export class SettingsPanel {
       this._panel.webview.postMessage({ type: "providerKeyActionResult", requestId: message.requestId, ok: false,
         error: String((error as Error).message || "Could not save API key changes.") });
     }
+  }
+
+  private _composing = false;
+
+  private async _composeTeam(planner: string, models: string[], saveHistory: boolean) {
+    if (this._composing) return;
+    this._composing = true;
+    const post = (status: Record<string, unknown>) => this._panel.webview.postMessage({ type: "teamComposeStatus", ...status });
+    post({ state: "running" });
+    try {
+      const composition = await vscode.commands.executeCommand<Composition>("ocursor.composeTeam", planner, models, this._lifetime.signal);
+      const f = this.featureStore.get();
+      const now = Date.now();
+      let history = f.teamSnapshots ?? [];
+      if (saveHistory && !history.some((s) => sameSetup(s, f))) {
+        history = addSnapshot(history, takeSnapshot(f, "Before composition", randomUUID(), now));
+      }
+      const next = applyComposition(f, composition, () => `team_${now}_${Math.random().toString(36).slice(2, 7)}`);
+      if (saveHistory) history = addSnapshot(history, takeSnapshot(next, "Composed", randomUUID(), now + 1, planner));
+      await this.featureStore.set({ ...next, teamSnapshots: history, teamComposerModel: planner, teamComposerModels: models });
+      await this._sendFeatures();
+      post({ state: "done", notes: composition.notes ?? "", assigned: composition.assignments.length, teams: composition.teams.length });
+    } catch (e: any) {
+      if (!this._lifetime.signal.aborted) post({ state: "error", error: e?.message || String(e) });
+    } finally {
+      this._composing = false;
+    }
+  }
+
+  private async _saveTeamSnapshot(label: string) {
+    const f = this.featureStore.get();
+    await this.featureStore.set({ teamSnapshots: addSnapshot(f.teamSnapshots ?? [], takeSnapshot(f, label, randomUUID(), Date.now())) });
+  }
+
+  private async _restoreTeamSnapshot(id: string) {
+    const f = this.featureStore.get();
+    const snapshot = (f.teamSnapshots ?? []).find((s) => s.id === id);
+    if (!snapshot) return;
+    let history = f.teamSnapshots ?? [];
+    // Never lose the live setup: keep it in history unless an entry already matches it.
+    if (!history.some((s) => sameSetup(s, f))) history = addSnapshot(history, takeSnapshot(f, "Before restore", randomUUID(), Date.now()));
+    await this.featureStore.set({ ...restoreSnapshot(snapshot), teamSnapshots: history });
   }
 
   private async _sendFeatures() {

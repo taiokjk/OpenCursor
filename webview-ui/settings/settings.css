@@ -149,6 +149,9 @@ textarea { resize: vertical; min-height: 90px; line-height: 1.5; }
 .msel-chip:hover:not(:disabled) { background: var(--hover); border-color: var(--control-focus-border); }
 .msel-chip.active { background: var(--primary-bg); border-color: var(--primary-bg); color: var(--primary-fg); }
 .msel-body { overflow-y: auto; padding: 6px; }
+.msel-multi-bar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--vscode-widget-border, var(--input-border)); font-size: 11.5px; color: var(--fg-dim); }
+.msel-multi-bar > span { flex: 1; }
+.msel-multi-bar .btn-primary.sm { padding: 3px 12px; font-size: 11.5px; }
 .msel-group { padding: 8px 8px 4px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--fg-dim); }
 .msel-item {
   display: flex; align-items: center; gap: 8px; padding: 7px 10px; min-height: var(--control-height);
@@ -528,6 +531,20 @@ input.fc-title-input { padding: 6px 8px; }
 
 /* Rules / Skills / Subagents */
 .rss-section-head { display: flex; align-items: center; justify-content: space-between; margin: 0 0 6px; }
+.team-composer { border: 1px solid var(--border-soft); border-radius: 10px; background: var(--card-bg); padding: 14px 16px; margin-bottom: 28px; }
+.team-composer .panel-hint { margin-bottom: 10px; }
+.tc-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; }
+.tc-field { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--fg-dim); min-width: 0; }
+.tc-field .msel-trigger { width: 100%; }
+.tc-run { white-space: nowrap; }
+.tc-save { margin-top: 10px; white-space: normal; }
+.tc-status { margin-top: 8px; font-size: 12px; color: var(--fg-dim); line-height: 1.5; }
+.tc-status.ok { color: inherit; }
+.tc-history { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+.tc-history-label { font-size: 12px; font-weight: 600; color: var(--fg-dim); }
+.tc-history select { flex: 1; min-width: 0; }
+.tc-snapshot { margin-top: 8px; font-size: 11.5px; color: var(--fg-dim); display: flex; flex-direction: column; gap: 3px; line-height: 1.5; }
+@media (max-width: 640px) { .tc-grid { grid-template-columns: 1fr; } }
 .rss-title { font-size: 12.5px; font-weight: 600; color: var(--fg-dim); display: inline-flex; align-items: center; gap: 6px; }
 .rss-help { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border: 1px solid var(--input-border); border-radius: 50%; font-size: 9.5px; color: var(--fg-faint); cursor: help; }
 .rss-list { display: flex; flex-direction: column; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--card-bg); overflow: hidden; }

@@ -40,18 +40,45 @@ const groupOf = (m: ModelSelectItem): string => {
  * `customItems` render pinned at the top (judge "first enabled", subagent
  * "inherit chat model", etc.).
  */
-export function ModelSelect({
+export function ModelSelect(props: {
+  models: ModelSelectItem[];
+  value: string;
+  onChange: (id: string) => void;
+  customItems?: ModelSelectCustom[];
+  style?: React.CSSProperties;
+}) {
+  return <ModelPicker {...props} />;
+}
+
+/**
+ * Multi-selection variant: same dialog, but options toggle and the dialog stays
+ * open. An empty selection means "all models" and is labelled as such.
+ */
+export function MultiModelSelect({ models, values, onChange, style, emptyLabel = "All enabled models", title = "Choose models" }: {
+  models: ModelSelectItem[];
+  values: string[];
+  onChange: (ids: string[]) => void;
+  style?: React.CSSProperties;
+  emptyLabel?: string;
+  title?: string;
+}) {
+  return <ModelPicker models={models} value="" onChange={() => {}} style={style} multi={{ values, onChange, emptyLabel, title }} />;
+}
+
+function ModelPicker({
   models,
   value,
   onChange,
   customItems,
   style,
+  multi,
 }: {
   models: ModelSelectItem[];
   value: string;
   onChange: (id: string) => void;
   customItems?: ModelSelectCustom[];
   style?: React.CSSProperties;
+  multi?: { values: string[]; onChange: (ids: string[]) => void; emptyLabel: string; title: string };
 }) {
   const [open, setOpen] = React.useState(false);
   const presence = usePresence(open);
@@ -80,10 +107,18 @@ export function ModelSelect({
     (c) => (provider === null) && (!q || c.label.toLowerCase().includes(q))
   );
 
-  const current =
-    customItems?.find((c) => c.value === value)?.label ??
-    models.find((m) => m.id === value)?.name ??
-    (value || customItems?.[0]?.label || "Select model");
+  const selected = new Set(multi?.values ?? []);
+  const isSelected = (id: string) => (multi ? selected.has(id) : value === id);
+  const multiLabel = () => {
+    const names = multi!.values.map((id) => models.find((m) => m.id === id)?.name ?? id);
+    if (!names.length) return multi!.emptyLabel;
+    return names.length <= 2 ? names.join(", ") : `${names.length} models selected`;
+  };
+  const current = multi
+    ? multiLabel()
+    : customItems?.find((c) => c.value === value)?.label ??
+      models.find((m) => m.id === value)?.name ??
+      (value || customItems?.[0]?.label || "Select model");
 
   const close = () => {
     setOpen(false);
@@ -95,9 +130,14 @@ export function ModelSelect({
   };
   const pick = (v: string) => {
     if (!open) return;
+    if (multi) {
+      multi.onChange(selected.has(v) ? multi.values.filter((x) => x !== v) : [...multi.values, v]);
+      return;
+    }
     onChange(v);
     close();
   };
+  const visibleIds = visibleGroups.flatMap(([, list]) => list.map((m) => m.id));
 
   React.useEffect(() => {
     if (!open) return;
@@ -151,7 +191,7 @@ export function ModelSelect({
       {presence.present && createPortal(
         <div className="msel-overlay" data-modal-layer={open ? "" : undefined} data-model-dialog data-state={presence.exiting ? "closing" : "open"}
           inert={presence.exiting || undefined} aria-hidden={presence.exiting || undefined} onMouseDown={(e) => e.target === e.currentTarget && close()}>
-          <div ref={dialogRef} id={dialogId} className="msel-dialog" role="dialog" aria-modal="true" aria-label="Choose model" onKeyDown={navigateResults}>
+          <div ref={dialogRef} id={dialogId} className="msel-dialog" role="dialog" aria-modal="true" aria-label={multi?.title ?? "Choose model"} onKeyDown={navigateResults}>
             <div className="msel-head">
               <input
                 ref={searchRef}
@@ -173,7 +213,15 @@ export function ModelSelect({
                 </button>
               ))}
             </div>
-            <div className="msel-body" role="listbox" aria-label="Models">
+            {multi && (
+              <div className="msel-multi-bar">
+                <span>{multi.values.length ? `${multi.values.length} selected` : multi.emptyLabel}</span>
+                <button type="button" className="btn-ghost sm" disabled={!visibleIds.length} onClick={() => multi.onChange([...new Set([...multi.values, ...visibleIds])])}>Select shown</button>
+                <button type="button" className="btn-ghost sm" disabled={!multi.values.length} onClick={() => multi.onChange([])}>Clear</button>
+                <button type="button" className="btn-primary sm" onClick={close}>Done</button>
+              </div>
+            )}
+            <div className="msel-body" role="listbox" aria-label="Models" aria-multiselectable={multi ? true : undefined}>
               {visibleCustom.map((c) => (
                 <button type="button" role="option" aria-selected={value === c.value}
                   key={c.value || "__custom__"}
@@ -191,10 +239,10 @@ export function ModelSelect({
                 <React.Fragment key={g}>
                   <div className="msel-group">{g}</div>
                   {list.map((m) => (
-                    <button type="button" role="option" aria-selected={value === m.id} key={m.id} className={"msel-item" + (value === m.id ? " active" : "")} onClick={() => pick(m.id)}>
+                    <button type="button" role="option" aria-selected={isSelected(m.id)} key={m.id} className={"msel-item" + (isSelected(m.id) ? " active" : "")} onClick={() => pick(m.id)}>
                       <span className="msel-item-name">{m.name}</span>
                       {m.id !== m.name && <span className="msel-item-sub">{m.id}</span>}
-                      {value === m.id && <Icon name="check" className="msel-item-check" size={16} />}
+                      {isSelected(m.id) && <Icon name="check" className="msel-item-check" size={16} />}
                     </button>
                   ))}
                 </React.Fragment>

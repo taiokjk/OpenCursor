@@ -178,6 +178,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Ctrl+L: add the current selection (or file) to chat as a mention.
   const todoLensesChanged = new vscode.EventEmitter<void>();
   context.subscriptions.push(
+    vscode.commands.registerCommand('ocursor.composeTeam', (planner: string, models: string[], signal?: AbortSignal) => sidebarProvider.composeTeam(planner, models ?? [], signal)),
     vscode.commands.registerCommand('ocursor.addToChat', () => sidebarProvider.addSelectionToChat()),
     vscode.commands.registerCommand('ocursor.newChat', () => sidebarProvider.newChat()),
     vscode.commands.registerCommand('ocursor.reviewChanges', () => sidebarProvider.startReview()),

@@ -12,7 +12,7 @@ import * as React from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { ModelSelect } from "./ModelSelect";
+import { ModelSelect, MultiModelSelect } from "./ModelSelect";
 import { setMotionPreference } from "./motionPreference";
 
 let root: Root, container: HTMLDivElement;
@@ -77,6 +77,24 @@ it("traps Tab in the picker and exposes the selected provider filter", () => {
   expect(filter.getAttribute("aria-pressed")).toBe("true");
   expect(document.querySelectorAll('[role="option"]')).toHaveLength(1);
   expect(document.querySelector('[role="option"]')?.textContent).toContain("Two");
+});
+
+it("multi-select toggles models, stays open, and summarises the selection", () => {
+  const changeMany = vi.fn();
+  act(() => root.render(<MultiModelSelect models={models} values={["one"]} onChange={changeMany} />));
+  expect(trigger().textContent).toContain("One");
+  act(() => trigger().click());
+  expect(document.querySelector('[role="listbox"]')?.getAttribute("aria-multiselectable")).toBe("true");
+  const options = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+  act(() => options[1].click());
+  expect(changeMany).toHaveBeenLastCalledWith(["one", "two"]);
+  act(() => options[0].click());
+  expect(changeMany).toHaveBeenLastCalledWith([]);
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  act(() => [...document.querySelectorAll<HTMLButtonElement>(".msel-multi-bar button")].find((b) => b.textContent === "Select shown")!.click());
+  expect(changeMany).toHaveBeenLastCalledWith(["one", "two"]);
+  act(() => root.render(<MultiModelSelect models={models} values={[]} onChange={changeMany} />));
+  expect(trigger().textContent).toContain("All enabled models");
 });
 
 it("returns focus immediately and prevents selection while its exit animation finishes", () => {

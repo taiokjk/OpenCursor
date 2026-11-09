@@ -38,6 +38,21 @@ export interface TeamDef {
   builtin?: boolean;
 }
 
+/** A dated subagent/team setup (mirror of src/agent/teamComposer.ts). */
+export interface TeamSnapshot {
+  id: string;
+  createdAt: number;
+  label: string;
+  planner?: string;
+  /** Custom subagents only; built-ins are stored as field overrides. */
+  subagents: SubagentDef[];
+  builtinSubagentOverrides: Record<string, Partial<SubagentDef>>;
+  /** Custom teams only. */
+  teams: TeamDef[];
+  activeTeamIds: string[];
+  subagentModel: string;
+}
+
 /** Unified hook events covering OpenCursor, Cursor and Claude Code trigger points. */
 export type HookEvent =
   | "beforeSubmit"
@@ -278,6 +293,9 @@ export interface FeatureConfig {
   subagentModel: string;
   subagentModelsV2?: boolean;
   autoJudgeModel: string;
+  teamComposerModel: string;
+  teamComposerModels: string[];
+  teamSnapshots: TeamSnapshot[];
   hooks: HookDef[];
   enabledModels: string[];
   disabledModels: string[];
@@ -379,6 +397,9 @@ export const EMPTY_FEATURES: FeatureConfig = {
   subagentModel: "__oauth__:antigravity::gemini-3.8-flash-high",
   subagentModelsV2: true,
   autoJudgeModel: "",
+  teamComposerModel: "",
+  teamComposerModels: [],
+  teamSnapshots: [],
   hooks: [],
   enabledModels: [],
   disabledModels: [],

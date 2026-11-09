@@ -10,8 +10,9 @@
 import * as React from "react";
 import { SettingsDialog } from "./SettingsDialog";
 import { Icon } from "../../shared/icons";
-import { ModelSelect } from "../../shared/ModelSelect";
-import { FeatureConfig, ModelDef, SubagentDef, TeamDef, uid } from "../features";
+import { ModelSelect, MultiModelSelect } from "../../shared/ModelSelect";
+import { vscode } from "../../shared/vscode";
+import { FeatureConfig, ModelDef, SubagentDef, TeamDef, TeamSnapshot, uid } from "../features";
 import { BUILTIN_TEAM_SUBAGENTS, isBuiltinTeamSubagent } from "../../../src/agent/teams";
 
 export function SubagentsPanel({
@@ -94,6 +95,8 @@ export function SubagentsPanel({
     <>
       <h1 className="page-title" style={{ marginBottom: 4 }}>Subagents &amp; Teams</h1>
       <p className="panel-hint" style={{ marginBottom: 24 }}>Define specialist agents and group them into teams the agent can delegate to</p>
+
+      <TeamComposer features={features} setFeatures={setFeatures} selectModels={selectModels} />
 
       <div className="rss-section-head">
         <span className="rss-title">Subagents <span className="rss-help" title="The agent can launch subagents for focused subtasks via the Task tool. Use a fast/cheap model for subagents.">?</span></span>
@@ -272,6 +275,142 @@ export function SubagentsPanel({
         />
       )}
     </>
+  );
+}
+
+type ComposeStatus =
+  | { state: "idle" }
+  | { state: "running" }
+  | { state: "done"; notes: string; assigned: number; teams: number }
+  | { state: "error"; error: string };
+
+const formatWhen = (t: number) =>
+  new Date(t).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+/**
+ * Lets a planner model re-staff the team: it assigns the chosen models to each
+ * subagent by role and proposes squads, overwriting the current setup. Every
+ * overwrite and restore keeps the previous setup as a dated snapshot.
+ */
+function TeamComposer({ features, setFeatures, selectModels }: {
+  features: FeatureConfig;
+  setFeatures: (f: Partial<FeatureConfig>) => void;
+  selectModels: ModelDef[] | { id: string; name: string }[];
+}) {
+  const [status, setStatus] = React.useState<ComposeStatus>({ state: "idle" });
+  const [saveHistory, setSaveHistory] = React.useState(true);
+  const [snapshotId, setSnapshotId] = React.useState("current");
+  const [confirmRestore, setConfirmRestore] = React.useState(false);
+  const planner = features.teamComposerModel ?? "";
+  const pool = features.teamComposerModels ?? [];
+  const snapshots = features.teamSnapshots ?? [];
+  const running = status.state === "running";
+
+  React.useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const msg = event.data;
+      if (msg?.type !== "teamComposeStatus") return;
+      if (msg.state === "running") setStatus({ state: "running" });
+      else if (msg.state === "done") { setStatus({ state: "done", notes: msg.notes ?? "", assigned: msg.assigned ?? 0, teams: msg.teams ?? 0 }); setSnapshotId("current"); }
+      else if (msg.state === "error") setStatus({ state: "error", error: msg.error ?? "Composition failed." });
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+  React.useEffect(() => {
+    if (snapshotId !== "current" && !snapshots.some((s) => s.id === snapshotId)) setSnapshotId("current");
+  }, [snapshots, snapshotId]);
+
+  const compose = () => {
+    setStatus({ state: "running" });
+    vscode.postMessage({ type: "composeTeam", planner, models: pool, saveHistory });
+  };
+  const selectedSnapshot = snapshots.find((s) => s.id === snapshotId);
+
+  return (
+    <div className="team-composer">
+      <div className="rss-section-head">
+        <span className="rss-title">Compose with AI <span className="rss-help" title="One request to the planner model. It judges each selected model's strengths and assigns them by role: strong reasoning models to planning, design and review; lighter, quota-friendly models to implementation and tests.">?</span></span>
+      </div>
+      <p className="panel-hint">Pick a planner model and the models the team may use. The planner assigns a model to every subagent and builds new squads, replacing the current setup.</p>
+      <div className="tc-grid">
+        <label className="tc-field">
+          <span>Planner model</span>
+          <ModelSelect models={selectModels as ModelDef[]} value={planner} onChange={(id) => setFeatures({ teamComposerModel: id })} />
+        </label>
+        <label className="tc-field">
+          <span>Models for the team</span>
+          <MultiModelSelect
+            models={selectModels as ModelDef[]}
+            values={pool}
+            onChange={(ids) => setFeatures({ teamComposerModels: ids })}
+            emptyLabel="All enabled models"
+            title="Models the team may use"
+          />
+        </label>
+        <button className="btn-primary tc-run" disabled={!planner || running} onClick={compose} title={planner ? "Compose subagent models and teams" : "Choose a planner model first"}>
+          <Icon name="users" size={13} /> {running ? "Composing…" : "Compose team"}
+        </button>
+      </div>
+      <label className="fc-inline tc-save">
+        <input type="checkbox" checked={saveHistory} onChange={(e) => setSaveHistory(e.target.checked)} />
+        Save the current and composed setups to history (with date and time)
+      </label>
+      {status.state === "running" && <div className="tc-status" role="status">Asking the planner to staff the team. This can take up to a few minutes.</div>}
+      {status.state === "done" && (
+        <div className="tc-status ok" role="status">
+          Assigned models to {status.assigned} subagent{status.assigned === 1 ? "" : "s"} and created {status.teams} team{status.teams === 1 ? "" : "s"}.{status.notes ? ` ${status.notes}` : ""}
+        </div>
+      )}
+      {status.state === "error" && <div className="fc-error tc-status" role="alert">{status.error} Your setup was not changed.</div>}
+
+      <div className="tc-history">
+        <span className="tc-history-label">History</span>
+        <select aria-label="Team setup history" value={snapshotId} onChange={(e) => setSnapshotId(e.target.value)} disabled={running}>
+          <option value="current">Current setup</option>
+          {snapshots.map((s) => (
+            <option key={s.id} value={s.id}>{formatWhen(s.createdAt)} · {s.label}</option>
+          ))}
+        </select>
+        <button className="btn-ghost sm" disabled={running || !selectedSnapshot} onClick={() => setConfirmRestore(true)}>Restore</button>
+        <button className="btn-ghost sm" disabled={running} onClick={() => vscode.postMessage({ type: "saveTeamSnapshot", label: "Manual snapshot" })} title="Save the current setup to history">Save current</button>
+        {selectedSnapshot && (
+          <button className="icon-btn" title="Delete snapshot" aria-label="Delete snapshot" disabled={running} onClick={() => vscode.postMessage({ type: "deleteTeamSnapshot", id: selectedSnapshot.id })}>
+            <Icon name="trash" size={13} />
+          </button>
+        )}
+      </div>
+      {selectedSnapshot && <SnapshotSummary snapshot={selectedSnapshot} subagents={features.subagents ?? []} models={selectModels} />}
+
+      {confirmRestore && selectedSnapshot && (
+        <SettingsDialog title="Restore team setup" onClose={() => setConfirmRestore(false)} className="modal-sm">
+          <div className="modal-body">
+            <p className="confirm-text">Replace the current subagents and teams with the snapshot from <b>{formatWhen(selectedSnapshot.createdAt)}</b>?</p>
+            <p className="confirm-detail">The current setup is kept in history, so you can switch back.</p>
+          </div>
+          <div className="modal-foot">
+            <button className="btn-ghost" onClick={() => setConfirmRestore(false)}>Cancel</button>
+            <button className="btn-primary" onClick={() => { vscode.postMessage({ type: "restoreTeamSnapshot", id: selectedSnapshot.id }); setConfirmRestore(false); setSnapshotId("current"); }}>Restore</button>
+          </div>
+        </SettingsDialog>
+      )}
+    </div>
+  );
+}
+
+function SnapshotSummary({ snapshot, subagents, models }: { snapshot: TeamSnapshot; subagents: SubagentDef[]; models: { id: string; name: string }[] }) {
+  const modelName = (id?: string) => (id ? models.find((m) => m.id === id)?.name ?? id : "inherit");
+  const nameOf = (id: string) => subagents.find((s) => s.id === id)?.name ?? snapshot.subagents.find((s) => s.id === id)?.name ?? id;
+  const assigned = [
+    ...Object.entries(snapshot.builtinSubagentOverrides ?? {}).filter(([, o]) => o.model !== undefined).map(([id, o]) => [nameOf(id), o.model] as const),
+    ...snapshot.subagents.map((s) => [s.name, s.model] as const),
+  ];
+  return (
+    <div className="tc-snapshot">
+      <div><b>Default subagent model:</b> {modelName(snapshot.subagentModel)}{snapshot.planner ? <> · <b>Planner:</b> {modelName(snapshot.planner)}</> : null}</div>
+      {assigned.length > 0 && <div><b>Model overrides:</b> {assigned.map(([n, m]) => `${n} → ${modelName(m)}`).join(", ")}</div>}
+      <div><b>Custom teams:</b> {snapshot.teams.length ? snapshot.teams.map((t) => `${t.name} (${t.subagentIds.length})`).join(", ") : "none"}</div>
+    </div>
   );
 }
 

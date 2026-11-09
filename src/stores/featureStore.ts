@@ -17,8 +17,10 @@ import type { LlamacppModel, LlamacppServerConfig } from "../agent/llamacpp";
 import { DEFAULT_APPROVAL, type ApprovalPolicy } from "../agent/approvalPolicy";
 import type { DocSource } from "../agent/docsIndex";
 import { type TeamDef, type BuiltinSubagentOverrides, builtinSubagentOverrides, withBuiltinTeamSubagents, withBuiltinTeams, withoutBuiltinTeamSubagents, withoutBuiltinTeams } from "../agent/teams";
+import type { TeamSnapshot } from "../agent/teamComposer";
 
 export type { TeamDef };
+export type { TeamSnapshot };
 
 export interface SubagentDef {
 	id: string;
@@ -318,6 +320,12 @@ export interface FeatureConfig {
 	subagentModelsV2?: boolean;
 	/** Judge model used by Auto mode to pick a model for each task ("" = first enabled). */
 	autoJudgeModel: string;
+	/** Planner model that composes subagent models and teams ("" = none chosen). */
+	teamComposerModel: string;
+	/** Models the composer may assign to subagents ([] = every enabled model). */
+	teamComposerModels: string[];
+	/** Dated subagent/team setups, newest first, restorable from Subagents & Teams. */
+	teamSnapshots: TeamSnapshot[];
 	/** Local embedding model id for the semantic codebase index. */
 	embedModel: string;
 	/** Device for local embeddings: "cpu" (default), "dml:<adapter>", "cuda:<index>" or "coreml". */
@@ -393,6 +401,9 @@ const DEFAULTS: FeatureConfig = {
 	subagentModel: "__oauth__:antigravity::gemini-3.8-flash-high",
 	subagentModelsV2: true,
 	autoJudgeModel: "",
+	teamComposerModel: "",
+	teamComposerModels: [],
+	teamSnapshots: [],
 	embedModel: "minilm",
 	embedAccelerator: "cpu",
 	hooks: [],
