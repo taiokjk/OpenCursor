@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { addSnapshot, applyComposition, buildComposerPrompt, MAX_TEAM_SNAPSHOTS, parseComposition, restoreSnapshot, sameSetup, takeSnapshot, type TeamSetup } from "./teamComposer";
+import { addSnapshot, applyComposition, buildComposerPrompt, matchSelectedModels, MAX_TEAM_SNAPSHOTS, parseComposition, restoreSnapshot, sameSetup, takeSnapshot, type TeamSetup } from "./teamComposer";
 import { BUILTIN_TEAM_SUBAGENTS, withBuiltinTeams, withBuiltinTeamSubagents } from "./teams";
 
 const subagents = [
@@ -103,6 +103,17 @@ it("stores built-ins compactly and restores them with their model overrides", ()
 	expect(back.subagents.find((s) => s.id === preset.id)).toMatchObject({ model: allowed[0], prompt: preset.prompt });
 	expect(sameSetup(back, full)).toBe(true);
 	expect(sameSetup(snap, full)).toBe(true);
+});
+
+it("matches bare settings-page ids to provider-scoped routing ids", () => {
+	const available = [
+		{ id: "__oauth__:claude-code::claude-opus-5-5", modelId: "claude-opus-5-5" },
+		{ id: "__oauth__:antigravity::gemini-3.8-flash", modelId: "gemini-3.8-flash" },
+		{ id: "popular:openrouter::gemini-3.8-flash", modelId: "gemini-3.8-flash" },
+	];
+	const { matched, missing } = matchSelectedModels(available, ["claude-opus-5-5", "gemini-3.8-flash", "__oauth__:claude-code::claude-opus-5-5", "gone-model"]);
+	expect(matched.map((m) => m.id)).toEqual(available.map((m) => m.id));
+	expect(missing).toEqual(["gone-model"]);
 });
 
 it("lists every model and roster member in the prompt", () => {

@@ -115,6 +115,23 @@ function resolveModel(raw: unknown, allowed: string[]): string | undefined {
 	return allowed.find((id) => id === value) ?? allowed.find((id) => bare(id) === bare(value));
 }
 
+/**
+ * Match the user's selection against the routable model list. The settings page
+ * lists bare ids ("claude-opus-5-5") while routing uses provider-scoped ids
+ * ("__oauth__:claude-code::claude-opus-5-5"), so accept either form. A bare id
+ * offered by several providers matches all of them.
+ */
+export function matchSelectedModels<T extends { id: string; modelId?: string }>(available: T[], selected: string[]): { matched: T[]; missing: string[] } {
+	const matched: T[] = [];
+	const missing: string[] = [];
+	for (const sel of selected) {
+		const hits = available.filter((m) => m.id === sel || bare(m.modelId ?? m.id) === bare(sel));
+		if (!hits.length) missing.push(sel);
+		for (const hit of hits) if (!matched.includes(hit)) matched.push(hit);
+	}
+	return { matched, missing };
+}
+
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 
 /**
