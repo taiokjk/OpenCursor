@@ -26,7 +26,7 @@ import { docIndexSettingsChanged, normalizeDocSourceSettings } from "../shared/d
 import { findWorkspaceRoot } from "../context/workspaceUtils";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { addSnapshot, applyComposition, restoreSnapshot, sameSetup, takeSnapshot, type Composition } from "../agent/teamComposer";
+import { addSnapshot, applyComposition, enableModels, restoreSnapshot, sameSetup, setupModels, takeSnapshot, type Composition } from "../agent/teamComposer";
 import * as llama from "../agent/llamacpp";
 import type { LlamacppModel } from "../agent/llamacpp";
 import * as ollama from "../agent/ollama";
@@ -939,7 +939,14 @@ export class SettingsPanel {
     let history = f.teamSnapshots ?? [];
     // Never lose the live setup: keep it in history unless an entry already matches it.
     if (!history.some((s) => sameSetup(s, f))) history = addSnapshot(history, takeSnapshot(f, "Before restore", randomUUID(), Date.now()));
-    await this.featureStore.set({ ...restoreSnapshot(snapshot), teamSnapshots: history });
+    const restored = restoreSnapshot(snapshot);
+    // A snapshot is only usable if the agent can route to its models, so switch them back on.
+    const { turnedOn, ...enablement } = enableModels(
+      { enabledModels: f.enabledModels ?? [], disabledModels: f.disabledModels ?? [], disabledLocalModels: f.disabledLocalModels ?? [] },
+      setupModels(restored),
+    );
+    await this.featureStore.set({ ...restored, ...enablement, teamSnapshots: history });
+    this._panel.webview.postMessage({ type: "teamComposeStatus", state: "restored", enabled: turnedOn });
   }
 
   private async _sendFeatures() {

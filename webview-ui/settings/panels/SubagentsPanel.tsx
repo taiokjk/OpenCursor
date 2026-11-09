@@ -282,7 +282,8 @@ type ComposeStatus =
   | { state: "idle" }
   | { state: "running" }
   | { state: "done"; notes: string; assigned: number; teams: number }
-  | { state: "error"; error: string };
+  | { state: "error"; error: string }
+  | { state: "restored"; enabled: string[] };
 
 const formatWhen = (t: number) =>
   new Date(t).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -313,6 +314,7 @@ function TeamComposer({ features, setFeatures, selectModels }: {
       if (msg.state === "running") setStatus({ state: "running" });
       else if (msg.state === "done") { setStatus({ state: "done", notes: msg.notes ?? "", assigned: msg.assigned ?? 0, teams: msg.teams ?? 0 }); setSnapshotId("current"); }
       else if (msg.state === "error") setStatus({ state: "error", error: msg.error ?? "Composition failed." });
+      else if (msg.state === "restored") setStatus({ state: "restored", enabled: Array.isArray(msg.enabled) ? msg.enabled : [] });
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -363,6 +365,14 @@ function TeamComposer({ features, setFeatures, selectModels }: {
         </div>
       )}
       {status.state === "error" && <div className="fc-error tc-status" role="alert">{status.error} Your setup was not changed.</div>}
+      {status.state === "restored" && (
+        <div className="tc-status ok" role="status">
+          Snapshot restored.{" "}
+          {status.enabled.length
+            ? `Enabled ${status.enabled.length} model${status.enabled.length === 1 ? "" : "s"} it uses: ${status.enabled.map((id) => selectModels.find((m) => m.id === id)?.name ?? id).join(", ")}.`
+            : "All of its models were already enabled."}
+        </div>
+      )}
 
       <div className="tc-history">
         <span className="tc-history-label">History</span>
@@ -386,7 +396,7 @@ function TeamComposer({ features, setFeatures, selectModels }: {
         <SettingsDialog title="Restore team setup" onClose={() => setConfirmRestore(false)} className="modal-sm">
           <div className="modal-body">
             <p className="confirm-text">Replace the current subagents and teams with the snapshot from <b>{formatWhen(selectedSnapshot.createdAt)}</b>?</p>
-            <p className="confirm-detail">The current setup is kept in history, so you can switch back.</p>
+            <p className="confirm-detail">Any of its models that are turned off will be enabled. The current setup is kept in history, so you can switch back.</p>
           </div>
           <div className="modal-foot">
             <button className="btn-ghost" onClick={() => setConfirmRestore(false)}>Cancel</button>

@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { addSnapshot, applyComposition, buildComposerPrompt, matchSelectedModels, MAX_TEAM_SNAPSHOTS, parseComposition, restoreSnapshot, sameSetup, takeSnapshot, type TeamSetup } from "./teamComposer";
+import { addSnapshot, applyComposition, buildComposerPrompt, enableModels, matchSelectedModels, setupModels, MAX_TEAM_SNAPSHOTS, parseComposition, restoreSnapshot, sameSetup, takeSnapshot, type TeamSetup } from "./teamComposer";
 import { BUILTIN_TEAM_SUBAGENTS, withBuiltinTeams, withBuiltinTeamSubagents } from "./teams";
 
 const subagents = [
@@ -114,6 +114,26 @@ it("matches bare settings-page ids to provider-scoped routing ids", () => {
 	const { matched, missing } = matchSelectedModels(available, ["claude-opus-5-5", "gemini-3.8-flash", "__oauth__:claude-code::claude-opus-5-5", "gone-model"]);
 	expect(matched.map((m) => m.id)).toEqual(available.map((m) => m.id));
 	expect(missing).toEqual(["gone-model"]);
+});
+
+it("enables a snapshot's models with the Models page switches", () => {
+	const restored: TeamSetup = {
+		...setup,
+		subagentModel: "__oauth__:antigravity::gemini-3.8-flash",
+		subagents: [
+			{ ...subagents[0], model: "__oauth__:claude-code::claude-opus-5-5" },
+			{ ...subagents[1], model: "llamacpp::qwen-local" },
+		],
+	};
+	expect(setupModels(restored)).toEqual(["__oauth__:antigravity::gemini-3.8-flash", "__oauth__:claude-code::claude-opus-5-5", "llamacpp::qwen-local"]);
+	const next = enableModels(
+		{ enabledModels: ["gemini-3.8-flash"], disabledModels: ["claude-opus-5-5", "other"], disabledLocalModels: ["qwen-local"] },
+		setupModels(restored),
+	);
+	expect(next.enabledModels).toEqual(["gemini-3.8-flash", "claude-opus-5-5"]);
+	expect(next.disabledModels).toEqual(["other"]);
+	expect(next.disabledLocalModels).toEqual([]);
+	expect(next.turnedOn).toEqual(["__oauth__:claude-code::claude-opus-5-5", "llamacpp::qwen-local"]);
 });
 
 it("lists every model and roster member in the prompt", () => {

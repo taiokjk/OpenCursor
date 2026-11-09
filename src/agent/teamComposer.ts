@@ -224,6 +224,47 @@ export function restoreSnapshot(snapshot: TeamSnapshot): TeamSetup {
 	};
 }
 
+/** Every model a setup routes to: the default subagent model plus per-subagent overrides. */
+export function setupModels(setup: TeamSetup): string[] {
+	return [...new Set([setup.subagentModel, ...setup.subagents.map((s) => s.model ?? "")].filter(Boolean))];
+}
+
+export interface ModelEnablement {
+	enabledModels: string[];
+	disabledModels: string[];
+	disabledLocalModels: string[];
+}
+
+/**
+ * Turn the given models on using the same switches as the Models page: local
+ * llama.cpp/Ollama models are shown unless listed in disabledLocalModels;
+ * everything else needs its bare id in enabledModels and not in disabledModels.
+ * Returns the new lists plus the ids that were actually off.
+ */
+export function enableModels(current: ModelEnablement, models: string[]): ModelEnablement & { turnedOn: string[] } {
+	const enabled = new Set(current.enabledModels);
+	const disabled = new Set(current.disabledModels);
+	const disabledLocal = new Set(current.disabledLocalModels);
+	const turnedOn: string[] = [];
+	for (const id of models) {
+		const sep = id.indexOf("::");
+		const scope = sep >= 0 ? id.slice(0, sep) : "";
+		const modelId = sep >= 0 ? id.slice(sep + 2) : id;
+		if (scope === "llamacpp" || scope === "ollama") {
+			const wasOff = disabledLocal.has(modelId) || disabledLocal.has(id);
+			disabledLocal.delete(modelId);
+			disabledLocal.delete(id);
+			if (wasOff) turnedOn.push(id);
+			continue;
+		}
+		const wasOff = disabled.has(modelId) || !enabled.has(modelId);
+		disabled.delete(modelId);
+		enabled.add(modelId);
+		if (wasOff) turnedOn.push(id);
+	}
+	return { enabledModels: [...enabled], disabledModels: [...disabled], disabledLocalModels: [...disabledLocal], turnedOn };
+}
+
 /** Newest first, capped so global state stays small. */
 export function addSnapshot(history: TeamSnapshot[], snapshot: TeamSnapshot): TeamSnapshot[] {
 	return [snapshot, ...history].slice(0, MAX_TEAM_SNAPSHOTS);

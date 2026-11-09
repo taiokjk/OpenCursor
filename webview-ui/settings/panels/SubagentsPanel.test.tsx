@@ -95,6 +95,8 @@ it("lists dated snapshots and restores one after confirmation", () => {
   const dialog = document.querySelector('[role="dialog"]')!;
   click([...dialog.querySelectorAll("button")].find((b) => b.textContent === "Restore")!);
   expect(post).toHaveBeenCalledWith({ type: "restoreTeamSnapshot", id: "s1" });
+  act(() => window.dispatchEvent(new MessageEvent("message", { data: { type: "teamComposeStatus", state: "restored", enabled: ["m1"] } })));
+  expect(container.querySelector(".tc-status")?.textContent).toContain("Enabled 1 model it uses: m1");
 });
 
 it("still deletes custom agents and removes only their team membership", () => {
