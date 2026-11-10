@@ -2099,6 +2099,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     return parseComposition(text, features.subagents, pool.map((m) => m.id));
   }
 
+  /**
+   * Send one tiny request to a model. A provider's quota window usually starts
+   * on the first request, so this lets the user start (and see) the reset timer.
+   */
+  public async pingModel(model: string, signal?: AbortSignal): Promise<string> {
+    if (!model) throw new Error("Choose a model to ping first.");
+    const prov = await this._resolveProviderForModel(model);
+    if (!prov.oauthKind && !prov.baseUrl) throw new Error(`The model "${model}" has no reachable provider.`);
+    const reply = await completeText({
+      apiBaseUrl: prov.baseUrl, apiKey: prov.apiKey, apiKeyPool: prov.apiKeyPool, anthropic: prov.anthropic, oauthKind: prov.oauthKind,
+      model: prov.model, system: "Reply with one short word.", user: "Hi", signal, timeoutMs: 60_000,
+      // Reasoning models spend part of the budget before answering; keep a little headroom.
+      maxTokens: 64, maxRetries: 0,
+      onUsage: (event) => {
+        if (this.featureStore.get().trackUsage !== false) void recordUsage(event.model ?? prov.model, event.promptTokens ?? 0, event.completionTokens ?? 0, event);
+      },
+    });
+    return reply;
+  }
+
   /** Auto mode: ask the judge model to choose an enabled model for the task. */
   private async _resolveAutoModel(task: string): Promise<string> {
     const features = this.featureStore.get();

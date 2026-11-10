@@ -557,6 +557,9 @@ export class SettingsPanel {
           case "resetUsage":
             await this._resetUsage(message.requestId);
             break;
+          case "pingModel":
+            await this._pingModel(String(message.model || ""), message.requestId);
+            break;
 
           // ---- OAuth accounts (Claude Code / Codex) ----
           case "oauthGet":
@@ -713,6 +716,27 @@ export class SettingsPanel {
       this._usageActionResult(requestId, "reset", "error", error);
     } finally {
       this._resettingUsage = false;
+    }
+  }
+
+  private _pinging = false;
+
+  private async _pingModel(model: string, requestId: unknown) {
+    const post = (result: Record<string, unknown>) => this._panel.webview.postMessage({ type: "pingModelResult", requestId, model, ...result });
+    if (this._pinging) {
+      post({ ok: false, error: "A ping is already in progress." });
+      return;
+    }
+    this._pinging = true;
+    try {
+      const reply = await vscode.commands.executeCommand<string>("ocursor.pingModel", model, this._lifetime.signal);
+      post({ ok: true, reply: String(reply ?? ""), at: Date.now() });
+      await flushUsage().catch(() => undefined);
+      this._panel.webview.postMessage({ type: "usageData", usage: getUsage() });
+    } catch (error) {
+      if (!this._lifetime.signal.aborted) post({ ok: false, error: String((error as Error)?.message || error) });
+    } finally {
+      this._pinging = false;
     }
   }
 

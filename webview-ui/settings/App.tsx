@@ -306,16 +306,91 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
+type PingStatus =
+  | { state: "idle" }
+  | { state: "running"; requestId: string }
+  | { state: "done"; model: string; at: number; reply: string }
+  | { state: "error"; error: string };
+
+/**
+ * Sends a single "Hi" to one model. Quota windows usually start on the first
+ * request, so this starts the window on demand and reveals its reset time.
+ */
+function PingModel({ models, onPinged }: { models: ModelDef[]; onPinged: () => void }) {
+  const [model, setModel] = React.useState("");
+  const [status, setStatus] = React.useState<PingStatus>({ state: "idle" });
+  const statusRef = React.useRef(status);
+  statusRef.current = status;
+  const onPingedRef = React.useRef(onPinged);
+  onPingedRef.current = onPinged;
+  const selected = models.some((m) => m.id === model) ? model : "";
+
+  React.useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      const message = event.data;
+      const current = statusRef.current;
+      if (message?.type !== "pingModelResult" || current.state !== "running" || message.requestId !== current.requestId) return;
+      if (message.ok) {
+        setStatus({ state: "done", model: String(message.model || ""), at: Number(message.at) || Date.now(), reply: String(message.reply || "") });
+        onPingedRef.current();
+      } else {
+        setStatus({ state: "error", error: message.error || "The ping failed." });
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
+
+  const ping = () => {
+    if (!selected || status.state === "running") return;
+    const requestId = uid("ping");
+    setStatus({ state: "running", requestId });
+    vscode.postMessage({ type: "pingModel", model: selected, requestId });
+  };
+  const name = (id: string) => models.find((m) => m.id === id)?.name ?? id;
+
+  return (
+    <>
+      <div className="section-label">Ping Model</div>
+      <div className="index-card">
+        <p className="row-desc">
+          Send a single short "Hi" to a model. Quota windows usually start on the first request, so this starts the window now and lets you see when it resets.
+        </p>
+        <div className="index-actions">
+          <ModelSelect
+            models={models}
+            value={selected}
+            onChange={setModel}
+            customItems={[{ value: "", label: "Choose a model…" }]}
+            style={{ maxWidth: 280 }}
+          />
+          <button className="btn-secondary" disabled={!selected || status.state === "running"} onClick={ping}>
+            <Icon name="send" /> {status.state === "running" ? "Pinging…" : "Ping"}
+          </button>
+        </div>
+        {status.state === "done" && (
+          <p className="row-desc" role="status">
+            Pinged {name(status.model)} at {new Date(status.at).toLocaleTimeString()}.{status.reply ? ` Reply: "${status.reply.slice(0, 60)}".` : ""} Account quota below was refreshed.
+          </p>
+        )}
+        {status.state === "error" && <p className="row-desc" role="alert">{status.error}</p>}
+      </div>
+    </>
+  );
+}
+
 function UsagePanel({
   usage,
   oauthStatus,
   features,
   setFeatures,
+  models,
 }: {
   usage: Record<string, ModelUsage>;
   oauthStatus: OAuthStatus;
   features: FeatureConfig;
   setFeatures: (p: Partial<FeatureConfig>) => void;
+  models: ModelDef[];
 }) {
   const [pending, setPending] = React.useState<"refresh" | "reset">();
   const [notice, setNotice] = React.useState<{ text: string; error?: boolean }>();
@@ -413,6 +488,8 @@ function UsagePanel({
           <Toggle checked={features.trackUsage !== false} onChange={(v) => setFeatures({ trackUsage: v })} />
         </Row>
       </Group>
+
+      <PingModel models={models} onPinged={() => setQuotaRefresh(value => value + 1)} />
 
       <div className="section-label">Account Quota</div>
       <p className="panel-hint">Rate-limit windows for your connected OAuth accounts ({oauthStatus.accounts.map((a) => OAUTH_LABEL[a.kind]).join(", ") || "none connected"}).</p>
@@ -999,7 +1076,13 @@ export function App() {
           )}
 
           {section === "usage" && (
-            <UsagePanel usage={usage} oauthStatus={oauthStatus} features={features} setFeatures={setFeatures} />
+            <UsagePanel
+              usage={usage}
+              oauthStatus={oauthStatus}
+              features={features}
+              setFeatures={setFeatures}
+              models={modelList.length ? modelList : [...modelCatalog, ...(features.customModels || [])].filter((m) => features.enabledModels.includes(m.id))}
+            />
           )}
 
           {section === "providers" && <ProvidersPanel features={features} setFeatures={setFeatures} oauthStatus={oauthStatus} />}

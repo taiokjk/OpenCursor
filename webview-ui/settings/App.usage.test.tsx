@@ -101,6 +101,12 @@ it("recovers from missing replies and ignores stale action acknowledgements", ()
   expect(button("Refresh").disabled).toBe(false);
 });
 
+it("keeps Ping disabled until a model is chosen", () => {
+  expect(container.textContent).toContain("Ping Model");
+  expect(button("Ping").disabled).toBe(true);
+  expect(posted("pingModel")).toHaveLength(0);
+});
+
 it("renders committed usage pushes while the page stays open", () => {
   receive({ type: "usageData", usage: { ...usage, "new-model": { promptTokens: 30, completionTokens: 4, requests: 1, lastUsed: 2 } } });
   expect(container.textContent).toContain("new-model");
