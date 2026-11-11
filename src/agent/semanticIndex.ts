@@ -250,8 +250,14 @@ export function cpuThreadBudget(cores = os.cpus()?.length || 1): number {
 }
 
 /** Session options for every EP: GPU sessions still run fallback kernels on CPU threads. */
-function embedSessionOptions(): Record<string, unknown> {
-  return { intraOpNumThreads: cpuThreadBudget(), interOpNumThreads: 1, executionMode: "sequential" };
+export function embedSessionOptions(platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+  const options: Record<string, unknown> = { intraOpNumThreads: cpuThreadBudget(), interOpNumThreads: 1, executionMode: "sequential" };
+  // On macOS, growing ORT's CPU BFC arena for large batches goes through an
+  // aligned operator new that Electron's allocator traps (EXC_BREAKPOINT),
+  // killing the whole extension host. A worker thread shares that process, so
+  // it cannot contain the crash; plain per-tensor allocation does not trap.
+  if (platform === "darwin") options.enableCpuMemArena = false;
+  return options;
 }
 
 /** A loaded embedding session, in a worker thread or (fallback) in-process. */

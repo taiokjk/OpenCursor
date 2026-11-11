@@ -166,6 +166,12 @@ describe("semantic indexing resource budgets", () => {
     expect([1, 2, 4, 8, 16, 32, 64].map(cores => semantic.cpuThreadBudget(cores))).toEqual([1, 1, 1, 2, 4, 4, 4]);
   });
 
+  it("disables the ORT CPU arena only on macOS, where growing it crashes the extension host", () => {
+    expect(semantic.embedSessionOptions("darwin")).toMatchObject({ enableCpuMemArena: false });
+    expect(semantic.embedSessionOptions("win32")).not.toHaveProperty("enableCpuMemArena");
+    expect(semantic.embedSessionOptions("linux")).not.toHaveProperty("enableCpuMemArena");
+  });
+
   it("does not re-embed a saved file whose content is unchanged", async () => {
     const target = path.join(root, "a.ts");
     await fs.writeFile(target, "export const a = 1;");
