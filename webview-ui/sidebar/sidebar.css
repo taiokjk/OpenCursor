@@ -638,6 +638,26 @@ button.working-head:focus-visible { outline: 1px solid var(--control-focus-borde
 	font-size: 0.88em;
 	color: var(--vscode-textPreformat-foreground, var(--fg));
 }
+.markdown-content .code-block { position: relative; margin: var(--sp-5) 0; }
+.markdown-content .code-block pre { margin: 0; }
+.markdown-content .code-copy {
+	position: absolute;
+	top: 6px;
+	right: 8px;
+	padding: 2px 8px;
+	font: inherit;
+	font-size: 11px;
+	color: var(--fg-dim);
+	background: var(--surface-2);
+	border: 1px solid var(--line-soft);
+	border-radius: var(--r-sm, 6px);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity .12s;
+}
+.markdown-content .code-block:hover .code-copy,
+.markdown-content .code-copy:focus-visible { opacity: 1; }
+.markdown-content .code-copy:hover { color: var(--fg); }
 .markdown-content pre {
 	direction: ltr;
 	text-align: left;

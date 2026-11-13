@@ -25,7 +25,8 @@ const marked = new Marked({
       highlightRemaining -= prefix.length;
       const language = getCodeLanguage(prefix, lang?.trim().split(/\s+/, 1)[0]).id;
       const content = highlightCode(prefix, language) + escapeCodeHtml(code.slice(prefix.length));
-      return `<pre><code class="language-${language}">${content}</code></pre>\n`;
+      // The wrapper lets MarkdownView pin a copy button that doesn't scroll with the code.
+      return `<div class="code-block"><pre><code class="language-${language}">${content}</code></pre></div>\n`;
     },
   },
 });

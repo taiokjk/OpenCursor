@@ -881,10 +881,16 @@ const AssistantContent = React.memo(function AssistantContent({ turn, turnIndex,
 
 interface WaitingTask { id: string; title: string }
 
+/** Tells the chat scroller to stop following the bottom (programmatic scroll-away). */
+const UNFOLLOW_EVENT = "opencursor:unfollow-chat";
+
 /** Scroll the chat to a task's card (the subagent card keyed by its call id) and flash it. */
 function revealTask(id: string) {
   const el = Array.from(document.querySelectorAll<HTMLElement>("[data-call-id]")).find(node => node.dataset.callId === id);
   if (!el) return;
+  // Jumping to a card is a deliberate scroll away from the tail: stop following
+  // the bottom first, or the next streamed render pulls the view straight back.
+  window.dispatchEvent(new Event(UNFOLLOW_EVENT));
   el.scrollIntoView({ behavior: "smooth", block: "center" });
   el.classList.remove("task-highlight");
   void el.offsetWidth;
@@ -1402,12 +1408,15 @@ export function App() {
       if (["ArrowUp", "PageUp", "Home"].includes(event.key) || event.key === " " && event.shiftKey) setStick(false);
       else evalStick();
     };
+    const onUnfollow = () => { userScrolledRef.current = true; pinTopRef.current = false; setStick(false); };
+    window.addEventListener(UNFOLLOW_EVENT, onUnfollow);
     el.addEventListener("wheel", onWheel, { passive: true });
     el.addEventListener("touchmove", onTouch, { passive: true });
     el.addEventListener("pointerdown", onDown);
     el.addEventListener("keydown", onKey);
     window.addEventListener("pointerup", onUp);
     return () => {
+      window.removeEventListener(UNFOLLOW_EVENT, onUnfollow);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("touchmove", onTouch);
       el.removeEventListener("pointerdown", onDown);
