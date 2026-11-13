@@ -1371,7 +1371,31 @@ export async function* streamOAuthChat(kind: OAuthKind, opts: {
   throw stopOAuthRetries(new ChatHTTPError(429, `${OAUTH_LABEL[kind]} accounts are temporarily unavailable. Retry in ${Math.max(1, Math.ceil((retryAt - Date.now()) / 1000))} seconds.`));
 }
 
-async function* streamProviderAccount(id: string, opts: Parameters<typeof streamOAuthChat>[1]): AsyncGenerator<ProviderEvent> {
+/**
+ * Stream through one specific account, without failover or balancing. Unlike
+ * normal chat this also accepts a disabled account, so a deliberate one-off
+ * request (a quota ping) can target any connected account.
+ */
+export async function* streamOAuthAccountChat(id: string, opts: Parameters<typeof streamOAuthChat>[1]): AsyncGenerator<ProviderEvent> {
+  opts.signal.throwIfAborted();
+  const account = accounts.get(id);
+  if (!account) throw stopOAuthRetries(new OAuthAccountError(`Account ${id} is no longer connected`));
+  const requestId = crypto.randomUUID();
+  const kind = account.kind;
+  const stream = kind === "claude-code" ? streamClaudeCode(id, opts, false)
+    : kind === "antigravity" ? streamAntigravity(id, opts, false) : kind === "codex" ? streamCodex(id, opts, false) : streamProviderAccount(id, opts, false);
+  for await (const event of stream) yield event.type === "usage" ? { ...event, requestId } : event;
+}
+
+/** The account itself, enforcing its enabled flag only when the caller requires it. */
+function usableAccount(id: string, requireEnabled: boolean): OAuthAccount {
+  if (requireEnabled) return enabledAccount(id);
+  const account = accounts.get(id);
+  if (!account) throw new OAuthAccountError(`Account ${id} is no longer connected`);
+  return account;
+}
+
+async function* streamProviderAccount(id: string, opts: Parameters<typeof streamOAuthChat>[1], requireEnabled = true): AsyncGenerator<ProviderEvent> {
   const { streamAccountAdapter, ProviderTransportError } = await import("./oauth/providerTransport.js");
   const generation = contextGeneration;
   let account = await waitForAccount(validAccount(id), opts.signal);
@@ -1379,11 +1403,11 @@ async function* streamProviderAccount(id: string, opts: Parameters<typeof stream
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       if (generation !== contextGeneration) throw stopOAuthRetries(new Error("The account context changed."));
-      account = enabledAccount(id);
+      account = usableAccount(id, requireEnabled);
       for await (const event of streamAccountAdapter({ ...opts, onCredentialsRefresh: async patch => {
         const current = accounts.get(id);
         if (!current || generation !== contextGeneration) throw new Error("The account is no longer connected.");
-        if (current.disabled) throw new Error("The account was disabled.");
+        if (requireEnabled && current.disabled) throw new Error("The account was disabled.");
         await saveAccount({ ...current, providerSpecificData: { ...current.providerSpecificData, ...patch.providerSpecificData } });
       } }, account)) { if (event.type !== "usage") progressed = true; yield event; }
       return;
@@ -1400,18 +1424,18 @@ async function* streamProviderAccount(id: string, opts: Parameters<typeof stream
   }
 }
 
-async function* streamClaudeCode(id: string, opts: Parameters<typeof buildClaudeMessagesRequest>[1] & { promptCacheKey?: string }): AsyncGenerator<ProviderEvent> {
+async function* streamClaudeCode(id: string, opts: Parameters<typeof buildClaudeMessagesRequest>[1] & { promptCacheKey?: string }, requireEnabled = true): AsyncGenerator<ProviderEvent> {
   // Claude Code session: stable per conversation, else per account for this window.
   const sessionId = claudeSeedUuid(`session:${id}:${opts.promptCacheKey ?? runtimeSessionId(id)}`);
-  const response = await oauthFetch(id, (account) => buildClaudeMessagesRequest(account.accessToken, { ...opts, sessionId }), opts.signal, true);
+  const response = await oauthFetch(id, (account) => buildClaudeMessagesRequest(account.accessToken, { ...opts, sessionId }), opts.signal, requireEnabled);
   if (!response.ok || !response.body) {
     throw await oauthStreamError("claude-code", response);
   }
   yield* parseAnthropicStream(response.body.getReader());
 }
 
-async function* streamCodex(id: string, opts: Parameters<typeof createCodexRequest>[0]): AsyncGenerator<ProviderEvent> {
-  const response = await oauthFetch(id, (account) => createCodexRequest(opts, account), opts.signal, true);
+async function* streamCodex(id: string, opts: Parameters<typeof createCodexRequest>[0], requireEnabled = true): AsyncGenerator<ProviderEvent> {
+  const response = await oauthFetch(id, (account) => createCodexRequest(opts, account), opts.signal, requireEnabled);
   if (!response.ok || !response.body) {
     throw await oauthStreamError("codex", response);
   }
@@ -1486,7 +1510,7 @@ async function* streamAntigravity(id: string, opts: {
   temperature?: number;
   promptCacheKey?: string;
   signal: AbortSignal;
-}): AsyncGenerator<ProviderEvent> {
+}, requireEnabled = true): AsyncGenerator<ProviderEvent> {
   try {
     const generation = contextGeneration;
     const initial = await ensureAntigravityProject(id, opts.signal);
@@ -1494,7 +1518,8 @@ async function* streamAntigravity(id: string, opts: {
     const sessionId = antigravitySessionId(opts.promptCacheKey ? `${id}:${opts.promptCacheKey}` : runtimeSessionId(id));
     const ambiguousModel = resolveAntigravityModel(opts.model).model !== resolveAntigravityModel(opts.model, [opts.model]).model;
     const send = async () => {
-      if (ambiguousModel && cachedAntigravityModels(enabledAccount(id)) === undefined) {
+      // Model discovery requires an enabled account; a disabled one sends the id as-is.
+      if (requireEnabled && ambiguousModel && cachedAntigravityModels(enabledAccount(id)) === undefined) {
         // Only ambiguous aliases need discovery before sending: a real dedicated
         // model may have superseded the catalog's old shared "tiered" ID.
         try { await fetchAntigravityModels(id, opts.signal); }
@@ -1508,7 +1533,7 @@ async function* streamAntigravity(id: string, opts: {
           headers: antigravityHeaders(account.accessToken, { purpose: "generation" }),
           body: JSON.stringify(toAntigravityRequest({ ...opts, projectId: account.projectId!, sessionId, availableModels: cachedAntigravityModels(account) })),
         },
-      }), opts.signal, true);
+      }), opts.signal, requireEnabled);
     };
     let response = await send();
     if (response.status === 404) {

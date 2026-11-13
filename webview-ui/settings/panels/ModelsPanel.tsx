@@ -9,6 +9,7 @@
 
 import * as React from "react";
 import { Icon } from "../../shared/icons";
+import { Select } from "../../shared/Select";
 import { vscode } from "../../shared/vscode";
 import {
   FeatureConfig,
@@ -16,6 +17,7 @@ import {
   LlamacppStatus,
   ModelDef,
   ModelKind,
+  OAUTH_LABEL,
   OAUTH_PROVIDERS,
   OllamaModel,
   OAuthStatus,
@@ -23,13 +25,36 @@ import {
   PROVIDER_PRESETS,
   ProviderConfig,
   ProviderKind,
+  uid,
 } from "../features";
 import { Toggle } from "./Toggle";
 import { sortModels } from "../../../src/shared/modelSort";
 
+export type PingState =
+  | { state: "running"; requestId: string }
+  | { state: "done"; at: number }
+  | { state: "error"; error: string };
+
+function PingResult({ ping }: { ping?: PingState }) {
+  if (ping?.state === "done") {
+    return <span className="row-desc" role="status">Pinged {new Date(ping.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>;
+  }
+  if (ping?.state === "error") {
+    return <span className="row-desc ping-error" role="alert" title={ping.error}>Ping failed</span>;
+  }
+  return null;
+}
+
+/** Where a ping goes: "" follows the row's own route; otherwise "account:<id>" or "provider:<id>". */
+export interface PingTarget { value: string; label: string }
+
 // Default and custom models render as flat rows with an enable toggle only;
 // their sampling options are configured in the chat model picker.
-function ModelRow({ model, enabled, onToggle, onRemove, badge }: { model: ModelDef; enabled: boolean; onToggle: () => void; onRemove?: () => void; badge?: string }) {
+function ModelRow({ model, enabled, onToggle, onRemove, badge, ping, onPing, targets, target, onTarget }: {
+  model: ModelDef; enabled: boolean; onToggle: () => void; onRemove?: () => void; badge?: string; ping?: PingState; onPing?: () => void;
+  targets?: PingTarget[]; target?: string; onTarget?: (value: string) => void;
+}) {
+  const pinging = ping?.state === "running";
   return (
     <div className="model-row">
       <div className="model-name">
@@ -38,10 +63,36 @@ function ModelRow({ model, enabled, onToggle, onRemove, badge }: { model: ModelD
         {model.id !== model.name && <span className="row-desc" style={{ marginLeft: 6, opacity: 0.6 }}>{model.id}</span>}
         {badge && <span className="badge-tag" style={{ marginLeft: 8 }}>{badge}</span>}
       </div>
-      {onRemove && (
-        <button className="icon-btn" onClick={onRemove} title="Remove model"><Icon name="trash" size={14} /></button>
-      )}
-      <Toggle label={`Enable ${model.name}`} checked={enabled} onChange={onToggle} />
+      <div className="model-row-actions">
+        <PingResult ping={ping} />
+        {onPing && targets && targets.length > 1 && (
+          <Select
+            className="ping-target"
+            aria-label={`Provider to ping ${model.name} through`}
+            title="Provider or account to send the ping through"
+            value={target ?? ""}
+            disabled={pinging}
+            onChange={(e) => onTarget?.(e.target.value)}
+          >
+            {targets.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+          </Select>
+        )}
+        {onPing && (
+          <button
+            className="btn-ghost sm ping-btn"
+            onClick={onPing}
+            disabled={pinging}
+            title={`Send one short "Hi" to ${model.name}. The first request usually starts the quota window, so you can see when it resets.`}
+            aria-label={`Ping ${model.name}`}
+          >
+            {pinging ? <><span className="llama-spinner" /> Pinging…</> : "Ping"}
+          </button>
+        )}
+        {onRemove && (
+          <button className="icon-btn" onClick={onRemove} title="Remove model"><Icon name="trash" size={14} /></button>
+        )}
+        <Toggle label={`Enable ${model.name}`} checked={enabled} onChange={onToggle} />
+      </div>
     </div>
   );
 }
@@ -66,7 +117,12 @@ interface ModelSectionSpec {
   local?: boolean;
   /** Extra badge per model id (e.g. "running" for loaded llama.cpp servers). */
   badgeFor?: (id: string) => string | undefined;
+  /** Routing scope for pings, so a row reaches exactly this provider ("<scope>::<modelId>"). */
+  routeScope: string;
 }
+
+/** Provider-scoped id the host routes to one exact provider. */
+export const routeId = (scope: string, modelId: string) => `${scope}::${modelId}`;
 
 function ModelSection({
   spec,
@@ -77,6 +133,11 @@ function ModelSection({
   isCustom,
   onRemove,
   onAdd,
+  pings,
+  onPing,
+  targetsFor,
+  targetOf,
+  onTarget,
 }: {
   spec: ModelSectionSpec;
   /** Force-expanded (used while searching). */
@@ -87,6 +148,11 @@ function ModelSection({
   isCustom: (id: string) => boolean;
   onRemove: (id: string) => void;
   onAdd?: (id: string) => void;
+  pings: Record<string, PingState>;
+  onPing: (routeId: string) => void;
+  targetsFor: (model: ModelDef) => PingTarget[];
+  targetOf: (routeId: string) => string;
+  onTarget: (routeId: string, value: string) => void;
 }) {
   const [open, setOpen] = React.useState(false);
   const [draft, setDraft] = React.useState("");
@@ -134,6 +200,11 @@ function ModelSection({
                     onToggle={() => onToggle(m.id)}
                     onRemove={!spec.local && isCustom(m.id) ? () => onRemove(m.id) : undefined}
                     badge={isCustom(m.id) ? "custom" : spec.badgeFor?.(m.id)}
+                    ping={pings[routeId(spec.routeScope, m.id)]}
+                    onPing={() => onPing(routeId(spec.routeScope, m.id))}
+                    targets={targetsFor(m)}
+                    target={targetOf(routeId(spec.routeScope, m.id))}
+                    onTarget={(value) => onTarget(routeId(spec.routeScope, m.id), value)}
                   />
                 ))}
               </div>
@@ -186,6 +257,39 @@ export function ModelsPanel({
   // Models fetched via a per-provider refresh (merged into that section's list).
   const [fetchedExtra, setFetchedExtra] = React.useState<Record<string, string[]>>({});
   const timeoutsRef = React.useRef<Map<string, number>>(new Map());
+  // Per-row ping status keyed by provider-scoped route id.
+  const [pings, setPings] = React.useState<Record<string, PingState>>({});
+  const pingsRef = React.useRef(pings);
+  pingsRef.current = pings;
+
+  // Per-row choice of provider/account to ping through ("" = the row's own route).
+  const [pingTargets, setPingTargets] = React.useState<Record<string, string>>({});
+
+  const ping = (id: string) => {
+    if (pingsRef.current[id]?.state === "running") return;
+    const requestId = uid("ping");
+    setPings((prev) => ({ ...prev, [id]: { state: "running", requestId } }));
+    const target = pingTargets[id];
+    vscode.postMessage({ type: "pingModel", model: id, requestId, ...(target ? { target } : {}) });
+  };
+
+  React.useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      const m = e.data;
+      if (m?.type !== "pingModelResult" || typeof m.model !== "string") return;
+      setPings((prev) => {
+        const current = prev[m.model];
+        // Ignore replies for a ping this row is no longer waiting on.
+        if (current?.state !== "running" || current.requestId !== m.requestId) return prev;
+        const next: PingState = m.ok
+          ? { state: "done", at: Number(m.at) || Date.now() }
+          : { state: "error", error: String(m.error || "The ping failed.") };
+        return { ...prev, [m.model]: next };
+      });
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
 
   const stopRefreshing = React.useCallback((key: string) => {
     setRefreshing((prev) => {
@@ -341,6 +445,7 @@ export function ModelsPanel({
       connected,
       models: modelsFor(id, kind),
       addTarget: { providerId: id, kind },
+      routeScope: id,
       onRefresh: p ? () => refreshProvider(p) : undefined,
       refreshing: refreshing.has(id),
       refreshError: refreshErrors[id],
@@ -358,6 +463,7 @@ export function ModelsPanel({
       connected,
       models: modelsFor(p.id, p.kind),
       addTarget: { providerId: p.id, kind: p.kind },
+      routeScope: p.id,
       onRefresh: () => refreshProvider(p),
       refreshing: refreshing.has(p.id),
       refreshError: refreshErrors[p.id],
@@ -390,6 +496,7 @@ export function ModelsPanel({
       connected,
       models: sortModels(list),
       addTarget: { providerId: id, kind },
+      routeScope: `__oauth__:${kind}`,
       onRefresh: () => { startRefreshing(id); fetchModels(); },
       refreshing: refreshing.has(id),
       refreshError: refreshErrors[id],
@@ -405,6 +512,7 @@ export function ModelsPanel({
     onRefresh: () => { startRefreshing("local:llamacpp"); vscode.postMessage({ type: "llamacppGet" }); },
     refreshing: refreshing.has("local:llamacpp"),
     local: true,
+    routeScope: "llamacpp",
     badgeFor: (id) => (llamacppStatus.running[id] ? "running" : "loads on use"),
   });
 
@@ -417,6 +525,7 @@ export function ModelsPanel({
     onRefresh: () => { startRefreshing("local:ollama"); vscode.postMessage({ type: "ollamaGet" }); },
     refreshing: refreshing.has("local:ollama"),
     local: true,
+    routeScope: "ollama",
   });
 
   // Search filters models inside every section; sections with hits auto-expand.
@@ -424,6 +533,33 @@ export function ModelsPanel({
     .filter((s) => s.connected)
     .map((s) => ({ ...s, models: s.models.filter(match) }))
     .filter((s) => !q || s.models.length > 0);
+
+  /**
+   * Every account and provider that can serve a model, disabled ones included:
+   * a ping is a one-off, so it may go through something chat would skip.
+   * The first entry is the row's own route.
+   */
+  const pingTargetsFor = (spec: ModelSectionSpec, model: ModelDef): PingTarget[] => {
+    const kinds = Array.isArray(model.kind) ? model.kind : [model.kind];
+    const targets: PingTarget[] = [{ value: "", label: `${spec.title} (default)` }];
+    if (spec.local) return targets;
+    for (const account of oauthStatus.accounts || []) {
+      if (!kinds.includes(account.kind)) continue;
+      const who = account.email || account.accountId || account.id;
+      targets.push({ value: `account:${account.id}`, label: `${OAUTH_LABEL[account.kind]} · ${who}${account.disabled ? " (disabled)" : ""}` });
+    }
+    for (const provider of features.providers || []) {
+      if (provider.id === spec.key) continue;
+      // Built-in providers serve their catalog by kind; custom endpoints only serve what they advertised.
+      const serves = provider.id.startsWith("popular:") ? kinds.includes(provider.kind) : model.providerId === provider.id;
+      if (!serves) continue;
+      const name = provider.id.startsWith("popular:")
+        ? (provider.kind === "openai" ? "OpenAI" : PROVIDER_PRESETS[provider.kind].label)
+        : provider.name || "(unnamed provider)";
+      targets.push({ value: `provider:${provider.id}`, label: `${name}${provider.enabled === false ? " (disabled)" : ""}` });
+    }
+    return targets;
+  };
 
   const refreshAll = () => {
     for (const s of sections) if (s.onRefresh && s.connected && !refreshing.has(s.key)) s.onRefresh();
@@ -468,6 +604,11 @@ export function ModelsPanel({
           isCustom={isCustom}
           onRemove={removeCustomModel}
           onAdd={s.addTarget ? (id) => addCustomModel(id, s.addTarget!.providerId, s.addTarget!.kind) : undefined}
+          pings={pings}
+          onPing={ping}
+          targetsFor={(model) => pingTargetsFor(s, model)}
+          targetOf={(id) => pingTargets[id] ?? ""}
+          onTarget={(id, value) => setPingTargets((prev) => ({ ...prev, [id]: value }))}
         />
       ))}
     </>

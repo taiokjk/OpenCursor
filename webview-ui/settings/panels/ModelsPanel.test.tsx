@@ -223,6 +223,54 @@ describe("current catalog in the actual Models panel", () => {
     expect(container.textContent).not.toContain("gemini-3.8-flash-medium");
   });
 
+  it("pings each row through its own provider and shows the result on that row only", async () => {
+    const { vscode } = await import("../../shared/vscode");
+    search("gpt-6-sol");
+    const pingButton = (provider: string) => rowFor(provider, "gpt-6-sol").querySelector<HTMLButtonElement>('button[aria-label="Ping GPT-6 Sol"]')!;
+    act(() => pingButton("OpenAI Codex").click());
+    act(() => pingButton("OpenAI").click());
+    const sent = vi.mocked(vscode.postMessage).mock.calls.map(([m]) => m as any).filter((m) => m.type === "pingModel");
+    expect(sent.map((m) => m.model)).toEqual(["__oauth__:codex::gpt-6-sol", "popular:openai::gpt-6-sol"]);
+    expect(pingButton("OpenAI Codex").disabled).toBe(true);
+    // A second click while running does not send another request.
+    act(() => pingButton("OpenAI Codex").click());
+    expect(vi.mocked(vscode.postMessage).mock.calls.filter(([m]) => (m as any).type === "pingModel")).toHaveLength(2);
+    const reply = (data: unknown) => act(() => window.dispatchEvent(new window.MessageEvent("message", { data })));
+    reply({ type: "pingModelResult", model: sent[0].model, requestId: "stale", ok: true, at: 1 });
+    expect(pingButton("OpenAI Codex").disabled).toBe(true);
+    reply({ type: "pingModelResult", model: sent[0].model, requestId: sent[0].requestId, ok: true, at: Date.now() });
+    expect(pingButton("OpenAI Codex").disabled).toBe(false);
+    expect(rowFor("OpenAI Codex", "gpt-6-sol").textContent).toContain("Pinged");
+    expect(rowFor("OpenAI", "gpt-6-sol").textContent).not.toContain("Pinged");
+    reply({ type: "pingModelResult", model: sent[1].model, requestId: sent[1].requestId, ok: false, error: "No quota left" });
+    const failure = rowFor("OpenAI", "gpt-6-sol").querySelector<HTMLElement>('[role="alert"]')!;
+    expect(failure.textContent).toBe("Ping failed");
+    expect(failure.title).toBe("No quota left");
+    expect(saved).not.toHaveBeenCalled();
+  });
+
+  it("labels the ping button and lets a ping go through a chosen, even disabled, provider or account", async () => {
+    const { vscode } = await import("../../shared/vscode");
+    const providers = connected.map((p) => (p.id === "popular:openai" ? { ...p, enabled: false } : p));
+    const oauthStatus: OAuthStatus = { accounts: [{ id: "codex-one", kind: "codex", email: "a@x.dev" }, { id: "codex-two", kind: "codex", email: "b@x.dev", disabled: true }], errors: {} };
+    act(() => root.render(<Harness key="targets" providers={providers} oauthStatus={oauthStatus} />));
+    search("gpt-6-sol");
+    const row = rowFor("OpenAI Codex", "gpt-6-sol");
+    const pingButton = row.querySelector<HTMLButtonElement>('button[aria-label="Ping GPT-6 Sol"]')!;
+    expect(pingButton.textContent).toBe("Ping");
+    const picker = row.querySelector<HTMLButtonElement>('[aria-label="Provider to ping GPT-6 Sol through"]')!;
+    act(() => picker.click());
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    expect(options.map((o) => o.textContent)).toEqual([
+      "OpenAI Codex (default)", "OpenAI Codex · a@x.dev", "OpenAI Codex · b@x.dev (disabled)", "OpenAI (disabled)",
+    ]);
+    act(() => options[2].click());
+    act(() => pingButton.click());
+    const sent = vi.mocked(vscode.postMessage).mock.calls.map(([m]) => m as any).filter((m) => m.type === "pingModel");
+    expect(sent[sent.length - 1]).toMatchObject({ model: "__oauth__:codex::gpt-6-sol", target: "account:codex-two" });
+    expect(saved).not.toHaveBeenCalled();
+  });
+
   it("orders provider models best-to-worst with same-family tiers together and no position jumps on refresh", () => {
     const oauthStatus: OAuthStatus = { accounts: [{ id: "google", kind: "antigravity" }], errors: {} };
     const initialList: ModelDef[] = [

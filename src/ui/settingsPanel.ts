@@ -558,7 +558,7 @@ export class SettingsPanel {
             await this._resetUsage(message.requestId);
             break;
           case "pingModel":
-            await this._pingModel(String(message.model || ""), message.requestId);
+            await this._pingModel(String(message.model || ""), message.requestId, typeof message.target === "string" ? message.target : undefined);
             break;
 
           // ---- OAuth accounts (Claude Code / Codex) ----
@@ -719,24 +719,25 @@ export class SettingsPanel {
     }
   }
 
-  private _pinging = false;
+  private readonly _pinging = new Set<string>();
 
-  private async _pingModel(model: string, requestId: unknown) {
-    const post = (result: Record<string, unknown>) => this._panel.webview.postMessage({ type: "pingModelResult", requestId, model, ...result });
-    if (this._pinging) {
-      post({ ok: false, error: "A ping is already in progress." });
+  private async _pingModel(model: string, requestId: unknown, target?: string) {
+    const post = (result: Record<string, unknown>) => this._panel.webview.postMessage({ type: "pingModelResult", requestId, model, target, ...result });
+    const key = `${target ?? ""}|${model}`;
+    if (this._pinging.has(key)) {
+      post({ ok: false, error: "A ping to this model is already in progress." });
       return;
     }
-    this._pinging = true;
+    this._pinging.add(key);
     try {
-      const reply = await vscode.commands.executeCommand<string>("ocursor.pingModel", model, this._lifetime.signal);
+      const reply = await vscode.commands.executeCommand<string>("ocursor.pingModel", model, this._lifetime.signal, target);
       post({ ok: true, reply: String(reply ?? ""), at: Date.now() });
       await flushUsage().catch(() => undefined);
       this._panel.webview.postMessage({ type: "usageData", usage: getUsage() });
     } catch (error) {
       if (!this._lifetime.signal.aborted) post({ ok: false, error: String((error as Error)?.message || error) });
     } finally {
-      this._pinging = false;
+      this._pinging.delete(key);
     }
   }
 

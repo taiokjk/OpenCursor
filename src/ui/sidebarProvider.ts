@@ -2103,20 +2103,60 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    * Send one tiny request to a model. A provider's quota window usually starts
    * on the first request, so this lets the user start (and see) the reset timer.
    */
-  public async pingModel(model: string, signal?: AbortSignal): Promise<string> {
+  public async pingModel(model: string, signal?: AbortSignal, target?: string): Promise<string> {
     if (!model) throw new Error("Choose a model to ping first.");
-    const prov = await this._resolveProviderForModel(model);
+    const onUsage = (fallbackModel: string) => (event: { model?: string; promptTokens?: number; completionTokens?: number }) => {
+      if (this.featureStore.get().trackUsage !== false) void recordUsage(event.model ?? fallbackModel, event.promptTokens ?? 0, event.completionTokens ?? 0, event as any);
+    };
+    // Reasoning models spend part of the budget before answering; keep a little headroom.
+    const request = { system: "Reply with one short word.", user: "Hi", signal, timeoutMs: 60_000, maxTokens: 64, maxRetries: 0 };
+    const bare = stripModelScope(model);
+
+    // A specific account or provider was picked. It may be disabled: a ping is a
+    // deliberate one-off, so it bypasses the enablement that gates normal chat.
+    if (target?.startsWith("account:")) {
+      const id = target.slice("account:".length);
+      if (!oauth.listAccounts().some((a) => a.id === id)) throw new Error("That account is no longer connected.");
+      const deadline = AbortSignal.timeout(request.timeoutMs);
+      const sig = signal ? AbortSignal.any([signal, deadline]) : deadline;
+      let text = "";
+      const record = onUsage(bare);
+      for await (const ev of oauth.streamOAuthAccountChat(id, {
+        model: bare, messages: [{ role: "system", content: request.system }, { role: "user", content: request.user }], maxTokens: request.maxTokens, signal: sig,
+      })) {
+        if (ev.type === "text-delta") text += ev.text;
+        if (ev.type === "usage") record(ev);
+      }
+      return text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "").trim();
+    }
+    if (target?.startsWith("provider:")) {
+      const id = target.slice("provider:".length);
+      const provider = this.featureStore.get().providers.find((p) => p.id === id);
+      if (!provider) throw new Error("That provider is no longer configured.");
+      const apiKey = await this._anyProviderKey(provider);
+      if (PROVIDER_PRESETS[provider.kind]?.needsKey && !apiKey) throw new Error(`${provider.name || provider.id} has no stored API key.`);
+      return completeText({
+        apiBaseUrl: provider.baseUrl, apiKey, anthropic: provider.kind === "anthropic", model: bare, ...request, onUsage: onUsage(bare),
+      });
+    }
+
+    const prov = await this._resolveProviderForModel(target === "llamacpp" || target === "ollama" ? `${target}::${bare}` : model, { load: true });
     if (!prov.oauthKind && !prov.baseUrl) throw new Error(`The model "${model}" has no reachable provider.`);
-    const reply = await completeText({
+    return completeText({
       apiBaseUrl: prov.baseUrl, apiKey: prov.apiKey, apiKeyPool: prov.apiKeyPool, anthropic: prov.anthropic, oauthKind: prov.oauthKind,
-      model: prov.model, system: "Reply with one short word.", user: "Hi", signal, timeoutMs: 60_000,
-      // Reasoning models spend part of the budget before answering; keep a little headroom.
-      maxTokens: 64, maxRetries: 0,
-      onUsage: (event) => {
-        if (this.featureStore.get().trackUsage !== false) void recordUsage(event.model ?? prov.model, event.promptTokens ?? 0, event.completionTokens ?? 0, event);
-      },
+      model: prov.model, ...request, onUsage: onUsage(prov.model),
     });
-    return reply;
+  }
+
+  /** First stored key for a provider, preferring enabled keys; ignores the provider's own enabled flag. */
+  private async _anyProviderKey(provider: ProviderConfig): Promise<string> {
+    if (provider.apiKeys === undefined) return (await this.settingsManager.getProviderKey(provider.id)) || "";
+    const keys = provider.apiKeys.filter((k) => k.id === provider.id || k.id.startsWith(`${provider.id}:key:`));
+    for (const key of [...keys.filter((k) => k.enabled !== false), ...keys.filter((k) => k.enabled === false)]) {
+      const secret = (await this.settingsManager.getProviderKey(key.id))?.trim();
+      if (secret) return secret;
+    }
+    return "";
   }
 
   /** Auto mode: ask the judge model to choose an enabled model for the task. */
